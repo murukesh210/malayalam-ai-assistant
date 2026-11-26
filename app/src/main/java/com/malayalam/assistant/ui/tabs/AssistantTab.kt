@@ -91,6 +91,7 @@ fun MinimalVoiceHomeScreen(
     chatHistory: List<ChatTurn>,
     speechLocale: String,
     isMicListening: Boolean,
+    isThinking: Boolean,
     micRmsLevel: Float,
     onOrbClick: () -> Unit,
     onStopAudio: () -> Unit,
@@ -103,7 +104,8 @@ fun MinimalVoiceHomeScreen(
 
     val displayHeadline = when {
         isMicListening -> if (speechLocale.startsWith("ml")) "കേൾക്കുന്നു..." else "Listening..."
-        playbackState.isPlaying -> playbackState.activeTitle.ifBlank { "Playing Dialogue..." }
+        isThinking -> if (speechLocale.startsWith("ml")) "ചിന്തിക്കുന്നു..." else "Thinking..."
+        playbackState.isPlaying -> playbackState.activeTitle.ifBlank { "Playing..." }
         else -> heroText
     }
 
@@ -199,8 +201,8 @@ fun MinimalVoiceHomeScreen(
 
             GlowingWaveformOrb(
                 isListening = isMicListening,
-                isPlaying = playbackState.isPlaying,
-                micLevel = micRmsLevel,
+                isPlaying = playbackState.isPlaying || isThinking,
+                micLevel = if (isThinking) 0.35f else micRmsLevel,
                 onClick = onOrbClick
             )
         }

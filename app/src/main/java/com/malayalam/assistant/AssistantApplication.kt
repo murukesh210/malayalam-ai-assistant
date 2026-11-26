@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import com.malayalam.assistant.ai.EmbeddingMatcherEngine
 import com.malayalam.assistant.ai.FunctionGemmaRouter
+import com.malayalam.assistant.ai.GeminiBrainClient
+import com.malayalam.assistant.ai.GeminiTtsClient
 import com.malayalam.assistant.ai.GemmaSituationEngine
 import com.malayalam.assistant.ai.ModelCoordinator
 import com.malayalam.assistant.ai.ModelDownloadManager
@@ -13,6 +15,7 @@ import com.malayalam.assistant.data.AppDatabase
 import com.malayalam.assistant.data.AppPreferences
 import com.malayalam.assistant.data.SafVaultRepository
 import com.malayalam.assistant.service.GmailDirectWatcherService
+import com.malayalam.assistant.service.IncomingMessageReactor
 import com.malayalam.assistant.worker.PipelineStatusTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -58,6 +61,9 @@ class AppGraph(context: Context) {
     )
 
     val audioPlayer = DialogueAudioPlayer(appContext)
+    val geminiBrainClient = GeminiBrainClient()
+    val geminiTtsClient = GeminiTtsClient()
+    val incomingMessageReactor = IncomingMessageReactor(appContext)
     val pipelineTracker = PipelineStatusTracker()
 
     companion object {

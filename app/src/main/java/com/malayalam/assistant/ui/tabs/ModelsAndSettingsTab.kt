@@ -2,6 +2,7 @@ package com.malayalam.assistant.ui.tabs
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,9 +16,12 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -44,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.malayalam.assistant.ai.ManagedModelId
@@ -77,8 +82,15 @@ fun ModelsAndSettingsTab(
     settings: UserSettings,
     modelStates: Map<ManagedModelId, ModelInstallState>,
     isNotificationAccessEnabled: Boolean,
+    isSmsPermissionGranted: Boolean,
+    geminiKeyTestResult: String,
     gmailTestResult: String,
     onBack: () -> Unit,
+    onSaveGeminiApiKey: (String) -> Unit,
+    onTestGeminiApiKey: (String) -> Unit,
+    onSelectGeminiVoice: (String) -> Unit,
+    onSetSpeakAfterClip: (Boolean) -> Unit,
+    onToggleSmsAutoReact: (Boolean) -> Unit,
     onToggleLanguage: () -> Unit,
     onSetTtsReplies: (Boolean) -> Unit,
     onSaveGmailConfig: (String, String) -> Unit,
@@ -100,6 +112,8 @@ fun ModelsAndSettingsTab(
     onToggleWatchedPackage: (String, Boolean) -> Unit,
     onSaveHfToken: (String) -> Unit
 ) {
+    var apiKeyInput by rememberSaveable { mutableStateOf("") }
+    var showApiKey by rememberSaveable { mutableStateOf(false) }
     var gmailInput by rememberSaveable(settings.gmailAddress) { mutableStateOf(settings.gmailAddress) }
     var gmailPassInput by rememberSaveable { mutableStateOf("") }
     var tokenInput by rememberSaveable(settings.hfAuthToken) { mutableStateOf(settings.hfAuthToken) }
@@ -124,7 +138,7 @@ fun ModelsAndSettingsTab(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
             }
             Text(
-                text = "Settings & Models",
+                text = "Settings & AI Brain",
                 color = Color.White,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 18.sp
@@ -137,7 +151,147 @@ fun ModelsAndSettingsTab(
                 .padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Language (ML / EN), Voice TTS & Default Assistant
+            // 1. GOOGLE AI STUDIO API KEY + EXPRESSIVE MALAYALAM VOICE PICKER (0 MB RAM!)
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(GeminiSurface)
+                        .border(1.dp, GeminiBlue.copy(alpha = 0.45f), RoundedCornerShape(18.dp))
+                        .padding(14.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Google AI Studio API Key",
+                            color = GeminiBlue,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = if (settings.hasGeminiApiKey) "Saved ✅" else "Free Key",
+                            color = if (settings.hasGeminiApiKey) GeminiMint else GeminiAmber,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Get Free Key at aistudio.google.com • Powers human-like Malayalam voice & AI brain with 0 MB phone RAM.",
+                        color = GeminiTextSecondary,
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = apiKeyInput,
+                        onValueChange = { apiKeyInput = it },
+                        label = {
+                            Text(
+                                text = if (settings.hasGeminiApiKey) {
+                                    "API Key saved ✅ (paste new key to replace)"
+                                } else {
+                                    "Paste AIza... Google AI Studio Key"
+                                },
+                                fontSize = 12.sp
+                            )
+                        },
+                        singleLine = true,
+                        visualTransformation = if (showApiKey) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { showApiKey = !showApiKey }) {
+                                Icon(
+                                    imageVector = if (showApiKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Show or Hide Key",
+                                    tint = GeminiTextSecondary
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                onSaveGeminiApiKey(apiKeyInput)
+                                apiKeyInput = ""
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Save Key", fontSize = 12.sp)
+                        }
+                        Button(
+                            onClick = { onTestGeminiApiKey(apiKeyInput) },
+                            modifier = Modifier.weight(1.2f),
+                            colors = ButtonDefaults.buttonColors(containerColor = GeminiBlue)
+                        ) {
+                            Text("Test Key", color = Color(0xFF071324), fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        }
+                    }
+
+                    if (geminiKeyTestResult.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = geminiKeyTestResult,
+                            color = if (geminiKeyTestResult.startsWith("❌")) GeminiCoral else GeminiMint,
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Malayalam TTS Voice (${settings.geminiVoiceName}):",
+                        color = GeminiTextPrimary,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        UserSettings.AVAILABLE_GEMINI_VOICES.forEach { voice ->
+                            FilterChip(
+                                selected = settings.geminiVoiceName == voice,
+                                onClick = { onSelectGeminiVoice(voice) },
+                                label = { Text(voice, fontSize = 12.sp) }
+                            )
+                        }
+                    }
+
+                    SettingToggleRow(
+                        title = "Speak Malayalam Reply After Movie Clip",
+                        subtitle = "Off by default: movie clip punchline plays immediately; TTS speaks when no clip matches",
+                        checked = settings.speakAfterDialogueClip,
+                        onCheckedChange = onSetSpeakAfterClip
+                    )
+                }
+            }
+
+            // 2. AUTOMATIC BANK SMS (CREDIT / DEBIT) & MESSAGE AUTO-REACTION
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(GeminiSurface)
+                        .border(1.dp, GeminiViolet.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
+                        .padding(14.dp)
+                ) {
+                    SettingToggleRow(
+                        title = "Auto-React to Bank & Message SMS",
+                        subtitle = if (isSmsPermissionGranted) {
+                            "SMS Permission Granted ✅ • Reacts to bank credit/debit & personal SMS (skips OTPs)"
+                        } else {
+                            "Tap ON to grant RECEIVE_SMS permission for instant bank credit/debit movie clips"
+                        },
+                        checked = settings.smsAutoReactEnabled && isSmsPermissionGranted,
+                        onCheckedChange = onToggleSmsAutoReact
+                    )
+                }
+            }
+
+            // 3. Language (ML / EN), Voice TTS & Default Assistant
             item {
                 Column(
                     modifier = Modifier
@@ -147,7 +301,7 @@ fun ModelsAndSettingsTab(
                         .padding(14.dp)
                 ) {
                     Text(
-                        text = "Voice Language & Default Assistant",
+                        text = "Language & Default Digital Assistant",
                         color = GeminiBlue,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 15.sp
@@ -167,8 +321,8 @@ fun ModelsAndSettingsTab(
                     }
 
                     SettingToggleRow(
-                        title = "Speak Short Replies Aloud (Built-in TTS)",
-                        subtitle = "Uses Android offline ml-IN / en-IN voice when no movie clip plays",
+                        title = "Speak Replies Aloud (Gemini Voice / Offline TTS)",
+                        subtitle = "Uses Gemini natural voice when API key is set, Android TTS offline",
                         checked = settings.ttsVoiceRepliesEnabled,
                         onCheckedChange = onSetTtsReplies
                     )
@@ -177,11 +331,11 @@ fun ModelsAndSettingsTab(
                     Button(
                         onClick = onOpenDefaultAssistantSettings,
                         modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = GeminiBlue)
+                        colors = ButtonDefaults.buttonColors(containerColor = GeminiCard)
                     ) {
                         Text(
                             text = "Set as Default Digital Assistant",
-                            color = Color(0xFF071324),
+                            color = GeminiTextPrimary,
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 12.sp
                         )
@@ -189,7 +343,7 @@ fun ModelsAndSettingsTab(
                 }
             }
 
-            // 2. Built-In Gmail Direct Watcher (Works on ALL Phones / Android Go / 2 GB RAM!)
+            // 4. Built-In Gmail Direct Watcher (Android Go / 2 GB RAM)
             item {
                 Column(
                     modifier = Modifier
@@ -208,7 +362,7 @@ fun ModelsAndSettingsTab(
                                 fontSize = 15.sp
                             )
                             Text(
-                                text = "Lightweight SSL IMAP (imap.gmail.com:993) polling UNSEEN mail every 20s • Tracks UID so emails never repeat.",
+                                text = "Raw SSL IMAP (imap.gmail.com:993) polling UNSEEN mail every 20s • Tracks UID so emails never repeat.",
                                 color = GeminiTextSecondary,
                                 fontSize = 11.sp
                             )
@@ -278,11 +432,7 @@ fun ModelsAndSettingsTab(
                     }
 
                     Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "Status: ${settings.gmailLastStatus}",
-                        color = GeminiTextSecondary,
-                        fontSize = 11.sp
-                    )
+                    Text(text = "Status: ${settings.gmailLastStatus}", color = GeminiTextSecondary, fontSize = 11.sp)
                     if (gmailTestResult.isNotBlank()) {
                         Spacer(Modifier.height(4.dp))
                         Text(
@@ -294,7 +444,7 @@ fun ModelsAndSettingsTab(
                 }
             }
 
-            // 3. Notification Listener + Android Go Detection + Deduplication Settings
+            // 5. Notification Listener + Audio Guards
             item {
                 Column(
                     modifier = Modifier
@@ -322,7 +472,7 @@ fun ModelsAndSettingsTab(
                     if (isAndroidGoDevice) {
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "⚠️ Android (Go edition) / Low-RAM OS detected: Android Go blocks Notification Access at the OS level. Use 'Gmail Direct Watcher' above for automatic email dialogue reactions!",
+                            text = "⚠️ Android (Go edition) blocks Notification Access at the OS level. Use 'Auto-React to Bank & Message SMS' and 'Gmail Direct Watcher' above!",
                             color = GeminiAmber,
                             fontSize = 12.sp,
                             lineHeight = 17.sp
@@ -355,7 +505,7 @@ fun ModelsAndSettingsTab(
 
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        text = "Match Sensitivity Threshold: ${String.format("%.2f", settings.matchThreshold)} (60s anti-repeat cooldown)",
+                        text = "Offline Match Threshold: ${String.format("%.2f", settings.matchThreshold)} (60s anti-repeat cooldown)",
                         color = GeminiTextPrimary,
                         fontSize = 13.sp
                     )
@@ -402,7 +552,7 @@ fun ModelsAndSettingsTab(
                 }
             }
 
-            // 4. 2 GB / 4 GB RAM Discipline & Optional On-Device AI Models
+            // 6. Optional Offline On-Device Models (4 GB+ RAM)
             item {
                 Column(
                     modifier = Modifier
@@ -412,7 +562,7 @@ fun ModelsAndSettingsTab(
                         .padding(14.dp)
                 ) {
                     Text(
-                        text = "RAM Safe Mode & Optional AI Models",
+                        text = "RAM Safe Mode & Optional Offline Models",
                         color = GeminiViolet,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 15.sp
@@ -427,7 +577,7 @@ fun ModelsAndSettingsTab(
                     SettingToggleRow(
                         title = "Ultra-Light Mode (2 GB RAM Safe)",
                         subtitle = if (isDevice2GbClass) {
-                            "Auto-enabled for your < 2.5 GB RAM phone — keeps 0 heavy LLMs in RAM"
+                            "Auto-enabled for < 2.5 GB RAM — uses 0 MB local AI RAM"
                         } else {
                             "Runs commands & dialogue matching with 0 MB AI overhead"
                         },
@@ -494,7 +644,7 @@ fun ModelsAndSettingsTab(
             title = { Text("Needs 4 GB+ RAM") },
             text = {
                 Text(
-                    text = "${heavyModel.title} requires ~${heavyModel.estRamMb} MB peak RAM and may cause slowdowns or crashes on a 2 GB RAM phone. Your built-in Malayalam/Manglish command router and dialogue matcher already work with 0 MB AI RAM! Download anyway?"
+                    text = "${heavyModel.title} requires ~${heavyModel.estRamMb} MB peak RAM. On a 2 GB RAM phone, use your Google AI Studio Free API Key above (0 MB phone RAM) instead! Download anyway?"
                 )
             },
             confirmButton = {
@@ -544,13 +694,13 @@ private fun ModelManagerCard(
                 Text(text = model.subtitle, color = GeminiTextSecondary, fontSize = 12.sp)
                 if (needs4GbWarning) {
                     Text(
-                        text = "⚠️ Needs 4 GB+ RAM (Not needed in 2 GB Ultra-Light Mode)",
+                        text = "⚠️ Needs 4 GB+ RAM (Use Google AI Studio Free Key instead)",
                         color = GeminiAmber,
                         fontSize = 11.sp
                     )
                 } else if (model == ManagedModelId.EMBEDDING_GEMMA_270M) {
                     Text(
-                        text = "✓ Optional lightweight semantic upgrade (~165 MB)",
+                        text = "✓ Optional lightweight offline semantic upgrade (~165 MB)",
                         color = GeminiMint,
                         fontSize = 11.sp
                     )

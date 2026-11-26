@@ -2,12 +2,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Network used ONLY for optional model downloads or direct Gmail SSL IMAP watcher -->
+    <!-- Network for Google AI Studio (Gemini Brain + TTS), Gmail Direct Watcher, and optional model downloads -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Live Voice Input (SpeechRecognizer ml-IN / en-IN) -->
+    <!-- Live Voice Input (AudioRecord VAD + SpeechRecognizer fallback) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Real-Time Bank & Message SMS Auto-Reaction -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
 
     <!-- Daily Actions Router (Alarms, Contacts, Calendar, Foreground Watcher) -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
@@ -120,6 +124,16 @@
             android:name=".service.GmailDirectWatcherService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Real-Time Bank & Message SMS Receiver -->
+        <receiver
+            android:name=".service.SmsReactionReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Low-Battery Broadcast Receiver -->
         <receiver

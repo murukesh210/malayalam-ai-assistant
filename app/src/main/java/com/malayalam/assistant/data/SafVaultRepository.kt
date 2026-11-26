@@ -55,9 +55,15 @@ class SafVaultRepository(
                 loadFromInternalFallback()
             }
 
-            // Seed helpful starter templates on first launch so user can 1-tap attach MP3s right away
-            if (_dialogues.value.isEmpty() && !fallbackVaultFile.exists()) {
-                _dialogues.value = defaultStarterTemplates()
+            // Ensure all 4 core starter slots exist on first launch (or add Bank Debited slot on upgrade)
+            val existingIds = _dialogues.value.map { it.id }.toSet()
+            val missingStarters = if (!fallbackVaultFile.exists() && _dialogues.value.isEmpty()) {
+                defaultStarterTemplates()
+            } else {
+                defaultStarterTemplates().filter { it.id == "starter_money_debited" && it.id !in existingIds }
+            }
+            if (missingStarters.isNotEmpty()) {
+                _dialogues.value = _dialogues.value + missingStarters
                 persistUnlocked()
             }
         }
@@ -232,44 +238,67 @@ class SafVaultRepository(
 
     private fun defaultStarterTemplates(): List<DialogueEntry> = listOf(
         DialogueEntry(
-            id = "starter_exam_fail",
-            fileName = "",
-            safUriString = "",
-            title = "Exam Fail / Arrear Reaction (e.g. Yodha)",
-            heardText = "പരീക്ഷ തോറ്റു / സപ്ലി കിട്ടി",
-            category = SituationCategory.EXAM_FAIL.id,
-            situations = listOf(
-                "You failed in your exam",
-                "exam fail",
-                "arrear",
-                "supply",
-                "low marks result",
-                "potti",
-                "പരീക്ഷ തോറ്റു"
-            ),
-            recommendedApps = listOf("com.google.android.gm", "com.whatsapp")
-        ),
-        DialogueEntry(
             id = "starter_money_salary",
             fileName = "",
             safUriString = "",
-            title = "Salary / Bank Money Credited",
+            title = "Bank Money Credited",
             heardText = "പൈസ വന്നു / അക്കൗണ്ടിൽ കാശ് കയറി",
             category = SituationCategory.MONEY.id,
             situations = listOf(
+                "credited",
+                "received Rs",
                 "salary credited",
-                "bank account credited",
-                "upi payment received",
+                "UPI credit",
+                "deposited",
+                "account credited with INR",
                 "paisa vannu",
                 "ശമ്പളം കിട്ടി"
             ),
             recommendedApps = listOf("com.google.android.gm", "com.google.android.apps.messaging")
         ),
         DialogueEntry(
+            id = "starter_money_debited",
+            fileName = "",
+            safUriString = "",
+            title = "Bank Money Debited / Spent",
+            heardText = "പൈസ പോയി / അക്കൗണ്ടിൽ നിന്ന് കാശ് കുറഞ്ഞു",
+            category = SituationCategory.MONEY.id,
+            situations = listOf(
+                "debited",
+                "spent",
+                "paid Rs",
+                "withdrawn",
+                "UPI debit",
+                "account debited by INR",
+                "paisa poyi",
+                "കാശ് പോയി"
+            ),
+            recommendedApps = listOf("com.google.android.gm", "com.google.android.apps.messaging")
+        ),
+        DialogueEntry(
+            id = "starter_exam_fail",
+            fileName = "",
+            safUriString = "",
+            title = "Exam Failed (Yodha)",
+            heardText = "പരീക്ഷ തോറ്റു / സപ്ലി കിട്ടി",
+            category = SituationCategory.EXAM_FAIL.id,
+            situations = listOf(
+                "failed",
+                "arrear",
+                "supply",
+                "exam result",
+                "did not pass",
+                "You failed in your exam",
+                "potti",
+                "പരീക്ഷ തോറ്റു"
+            ),
+            recommendedApps = listOf("com.google.android.gm", "com.whatsapp")
+        ),
+        DialogueEntry(
             id = "starter_low_battery",
             fileName = "",
             safUriString = "",
-            title = "Low Battery Warning Clip",
+            title = "Low Battery / General Alert",
             heardText = "ചാർജ് തീരാറായി വേഗം ചാർജിലിട്",
             category = SituationCategory.LOW_BATTERY.id,
             situations = listOf(

@@ -40,7 +40,6 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -81,7 +80,7 @@ private enum class AppDestination {
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
-    private var speechRecognizer: SpeechRecognizer? = null
+    private var fallbackSpeechRecognizer: SpeechRecognizer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,10 +95,12 @@ class MainActivity : ComponentActivity() {
                 var pendingModelImportTarget by remember { mutableStateOf<ManagedModelId?>(null) }
                 var pendingAttachDialogueId by remember { mutableStateOf<String?>(null) }
 
-                var isMicListening by remember { mutableStateOf(false) }
-                var micRmsLevel by remember { mutableFloatStateOf(0f) }
+                var isFallbackMicListening by remember { mutableStateOf(false) }
                 var notifEnabled by remember {
                     mutableStateOf(AudioOutputGuard.isNotificationAccessGranted(this))
+                }
+                var smsPermGranted by remember {
+                    mutableStateOf(hasSmsPermissions())
                 }
 
                 val lifecycleOwner = LocalLifecycleOwner.current
@@ -107,13 +108,13 @@ class MainActivity : ComponentActivity() {
                     val observer = LifecycleEventObserver { _, event ->
                         if (event == Lifecycle.Event.ON_RESUME) {
                             notifEnabled = AudioOutputGuard.isNotificationAccessGranted(this@MainActivity)
+                            smsPermGranted = hasSmsPermissions()
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
                     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
-                // Back gesture returns cleanly from any drawer/settings screen to the pure Home Orb
                 BackHandler(enabled = destination != AppDestination.HOME_ORB || drawerState.isOpen) {
                     if (drawerState.isOpen) {
                         uiScope.launch { drawerState.close() }
@@ -123,6 +124,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val heroText by viewModel.heroGreetingOrReply.collectAsState()
+                val isListeningVad by viewModel.isListeningVad.collectAsState()
+                val isThinking by viewModel.isThinking.collectAsState()
+                val micRmsLevel by viewModel.micRmsLevel.collectAsState()
                 val ramStatus by viewModel.ramStatus.collectAsState()
                 val playbackState by viewModel.playbackState.collectAsState()
                 val chatHistory by viewModel.chatHistory.collectAsState()
@@ -134,34 +138,46 @@ class MainActivity : ComponentActivity() {
                 val pipelineProgress by viewModel.pipelineProgress.collectAsState()
                 val simulatorResults by viewModel.simulatorResults.collectAsState()
                 val bannerMessage by viewModel.vaultBannerMessage.collectAsState()
+                val geminiKeyTestResult by viewModel.geminiKeyTestResult.collectAsState()
                 val gmailTestResult by viewModel.gmailTestResult.collectAsState()
                 val modelStates by viewModel.modelStates.collectAsState()
 
                 val runtimePermissionsLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
-                ) { _ -> }
+                ) { _ ->
+                    smsPermGranted = hasSmsPermissions()
+                }
+
+                val smsPermissionsLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { results ->
+                    val granted = results[Manifest.permission.RECEIVE_SMS] == true || hasSmsPermissions()
+                    smsPermGranted = granted
+                    viewModel.setSmsAutoReactEnabled(granted)
+                }
 
                 val micPermissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission()
                 ) { granted ->
                     if (granted) {
-                        toggleActivityMic(
-                            locale = settings.speechLocale,
-                            currentlyListening = isMicListening,
-                            onListeningState = { active ->
-                                isMicListening = active
-                                if (!active) micRmsLevel = 0f
-                            },
-                            onRmsLevel = { micRmsLevel = it },
-                            onPartialResult = viewModel::updateLivePartialSpeech,
-                            onFinalResult = { spoken ->
-                                if (spoken.isNotBlank()) {
-                                    viewModel.sendChatOrAction(spoken)
-                                } else {
-                                    viewModel.resetGreetingToNamaskaram()
+                        if (settings.hasGeminiApiKey) {
+                            viewModel.toggleSmartVadRecording()
+                        } else {
+                            toggleFallbackSpeechRecognizer(
+                                locale = settings.speechLocale,
+                                currentlyListening = isFallbackMicListening,
+                                onListeningState = { active ->
+                                    isFallbackMicListening = active
+                                    if (!active) viewModel.updateExternalMicRms(0f)
+                                },
+                                onRmsLevel = viewModel::updateExternalMicRms,
+                                onPartialResult = viewModel::updateLivePartialSpeech,
+                                onFinalResult = { spoken ->
+                                    if (spoken.isNotBlank()) viewModel.sendChatOrAction(spoken)
+                                    else viewModel.resetGreetingToNamaskaram()
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                 }
 
@@ -224,7 +240,7 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.padding(horizontal = 20.dp)
                             )
                             Text(
-                                text = "${dialogues.size} dialogues • ${if (settings.isMalayalamMode) "ML Mode" else "EN Mode"}",
+                                text = "${dialogues.size} dialogues • ${if (settings.hasGeminiApiKey) "Gemini Voice Ready" else "Offline Mode"}",
                                 color = GeminiTextSecondary,
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
@@ -298,7 +314,7 @@ class MainActivity : ComponentActivity() {
                             Spacer(Modifier.height(8.dp))
 
                             NavigationDrawerItem(
-                                label = { Text("Settings & Gmail Watcher") },
+                                label = { Text("Settings & AI Key") },
                                 icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                                 selected = destination == AppDestination.MODELS_SETTINGS,
                                 colors = drawerItemColors,
@@ -317,32 +333,42 @@ class MainActivity : ComponentActivity() {
                             playbackState = playbackState,
                             chatHistory = chatHistory,
                             speechLocale = settings.speechLocale,
-                            isMicListening = isMicListening,
+                            isMicListening = isListeningVad || isFallbackMicListening,
+                            isThinking = isThinking,
                             micRmsLevel = micRmsLevel,
                             onOrbClick = {
-                                viewModel.stopAudio()
+                                // 1. Tapping orb while audio/TTS is playing stops playback immediately
+                                if (playbackState.isPlaying) {
+                                    viewModel.stopAudio()
+                                    return@MinimalVoiceHomeScreen
+                                }
                                 val hasMicPerm = ContextCompat.checkSelfPermission(
                                     this@MainActivity,
                                     Manifest.permission.RECORD_AUDIO
                                 ) == PackageManager.PERMISSION_GRANTED
-                                if (hasMicPerm) {
-                                    toggleActivityMic(
+                                if (!hasMicPerm) {
+                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    return@MinimalVoiceHomeScreen
+                                }
+                                // 2. Primary: Real VAD AudioRecord -> Gemini Brain when API key is configured
+                                if (settings.hasGeminiApiKey) {
+                                    viewModel.toggleSmartVadRecording()
+                                } else {
+                                    // Offline fallback when no API key is entered yet
+                                    toggleFallbackSpeechRecognizer(
                                         locale = settings.speechLocale,
-                                        currentlyListening = isMicListening,
+                                        currentlyListening = isFallbackMicListening,
                                         onListeningState = { active ->
-                                            isMicListening = active
-                                            if (!active) micRmsLevel = 0f
+                                            isFallbackMicListening = active
+                                            if (!active) viewModel.updateExternalMicRms(0f)
                                         },
-                                        onRmsLevel = { micRmsLevel = it },
+                                        onRmsLevel = viewModel::updateExternalMicRms,
                                         onPartialResult = viewModel::updateLivePartialSpeech,
                                         onFinalResult = { spoken ->
-                                            if (spoken.isNotBlank()) {
-                                                viewModel.sendChatOrAction(spoken)
-                                            }
+                                            if (spoken.isNotBlank()) viewModel.sendChatOrAction(spoken)
+                                            else viewModel.resetGreetingToNamaskaram()
                                         }
                                     )
-                                } else {
-                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 }
                             },
                             onStopAudio = viewModel::stopAudio,
@@ -408,8 +434,23 @@ class MainActivity : ComponentActivity() {
                             settings = settings,
                             modelStates = modelStates,
                             isNotificationAccessEnabled = notifEnabled,
+                            isSmsPermissionGranted = smsPermGranted,
+                            geminiKeyTestResult = geminiKeyTestResult,
                             gmailTestResult = gmailTestResult,
                             onBack = { destination = AppDestination.HOME_ORB },
+                            onSaveGeminiApiKey = viewModel::saveGeminiApiKey,
+                            onTestGeminiApiKey = viewModel::testGeminiApiKey,
+                            onSelectGeminiVoice = viewModel::setGeminiVoiceName,
+                            onSetSpeakAfterClip = viewModel::setSpeakAfterDialogueClip,
+                            onToggleSmsAutoReact = { enabled ->
+                                if (enabled && !hasSmsPermissions()) {
+                                    smsPermissionsLauncher.launch(
+                                        arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS)
+                                    )
+                                } else {
+                                    viewModel.setSmsAutoReactEnabled(enabled)
+                                }
+                            },
                             onToggleLanguage = viewModel::toggleSpeechLocale,
                             onSetTtsReplies = viewModel::setTtsRepliesEnabled,
                             onSaveGmailConfig = viewModel::saveGmailConfig,
@@ -459,6 +500,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun hasSmsPermissions(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+    }
+
     private fun requestActionPermissionsIfNeeded(launchPerms: (Array<String>) -> Unit) {
         val perms = mutableListOf(
             Manifest.permission.READ_CONTACTS,
@@ -471,7 +516,7 @@ class MainActivity : ComponentActivity() {
         launchPerms(perms.toTypedArray())
     }
 
-    private fun toggleActivityMic(
+    private fun toggleFallbackSpeechRecognizer(
         locale: String,
         currentlyListening: Boolean,
         onListeningState: (Boolean) -> Unit,
@@ -480,14 +525,14 @@ class MainActivity : ComponentActivity() {
         onFinalResult: (String) -> Unit
     ) {
         if (currentlyListening) {
-            stopMic()
+            stopFallbackMic()
             onListeningState(false)
             return
         }
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
-        stopMic()
+        stopFallbackMic()
         val rec = SpeechRecognizer.createSpeechRecognizer(this)
-        speechRecognizer = rec
+        fallbackSpeechRecognizer = rec
         rec.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 onListeningState(true)
@@ -522,16 +567,16 @@ class MainActivity : ComponentActivity() {
         rec.startListening(intent)
     }
 
-    private fun stopMic() {
+    private fun stopFallbackMic() {
         runCatching {
-            speechRecognizer?.stopListening()
-            speechRecognizer?.destroy()
+            fallbackSpeechRecognizer?.stopListening()
+            fallbackSpeechRecognizer?.destroy()
         }
-        speechRecognizer = null
+        fallbackSpeechRecognizer = null
     }
 
     override fun onDestroy() {
-        stopMic()
+        stopFallbackMic()
         super.onDestroy()
     }
 }

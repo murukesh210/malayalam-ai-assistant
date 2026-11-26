@@ -22,14 +22,15 @@ import kotlinx.coroutines.launch
 
 object AudioOutputGuard {
 
-    private val OTP_KEYWORDS = listOf(
-        "otp", "one-time password", "one time password", "verification code", "security code", "passcode", "auth code"
-    )
-    private val OTP_DIGITS_REGEX = Regex("\\b\\d{4,8}\\b")
+    private val OTP_REGEX = Regex("\\b(otp|verification code|cvv|one[- ]?time password|security code|passcode|auth code)\\b", RegexOption.IGNORE_CASE)
+    private val BANK_TXN_REGEX = Regex("\\b(credited|debited|received rs|paid rs|withdrawn|deposited|upi credit|upi debit|spent|salary credited)\\b", RegexOption.IGNORE_CASE)
 
+    /**
+     * Skips OTP / CVV / verification code messages UNLESS bank credit/debit keywords are present.
+     */
     fun isLikelyOtp(text: String): Boolean {
-        val lower = text.lowercase()
-        return OTP_DIGITS_REGEX.containsMatchIn(lower) && OTP_KEYWORDS.any { lower.contains(it) }
+        if (BANK_TXN_REGEX.containsMatchIn(text)) return false
+        return OTP_REGEX.containsMatchIn(text)
     }
 
     fun canPlayReactionNow(context: Context, headphonesOnly: Boolean): Boolean {
@@ -42,13 +43,22 @@ object AudioOutputGuard {
             return false
         }
 
-        // 2. Respect Silent / Vibrate ringer mode
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+
+        // 2. Never interrupt an active phone call or VoIP call!
+        if (am.mode == AudioManager.MODE_IN_CALL ||
+            am.mode == AudioManager.MODE_IN_COMMUNICATION ||
+            am.mode == AudioManager.MODE_RINGTONE
+        ) {
+            return false
+        }
+
+        // 3. Respect Silent / Vibrate ringer mode
         if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) {
             return false
         }
 
-        // 3. Enforce "Headphones / Bluetooth Only" when toggled ON
+        // 4. Enforce "Headphones / Bluetooth Only" when toggled ON
         if (headphonesOnly && !isHeadsetOrBluetoothConnected(am)) {
             return false
         }
@@ -79,11 +89,7 @@ object AudioOutputGuard {
 }
 
 /**
- * Background `NotificationListenerService` (for standard 4 GB+ Android phones):
- *  - Watches selected apps (Gmail, WhatsApp, Messages, etc.)
- *  - Skips ongoing notifications, group summaries, and OTPs
- *  - Deduplicates by `notificationKey + textHash` with a strict 60-second cooldown
- *    so the same notification NEVER loops or plays twice!
+ * Background `NotificationListenerService` routed through the unified `IncomingMessageReactor`.
  */
 class DialogueNotificationListenerService : NotificationListenerService() {
 
@@ -104,37 +110,23 @@ class DialogueNotificationListenerService : NotificationListenerService() {
             ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString().orEmpty().trim()
         val combined = "$title $body".trim()
         if (combined.length < 3) return
-        if (AudioOutputGuard.isLikelyOtp(combined)) return
 
         val notifKey = sbn.key ?: pkg
 
         serviceScope.launch {
             val graph = AppGraph.from(applicationContext)
             val settings = graph.prefs.snapshot()
-            // Avoid double-playing Gmail if Gmail Direct Watcher is already handling Gmail
             if (pkg == "com.google.android.gm" && settings.gmailWatcherEnabled) return@launch
+            if (pkg == "com.google.android.apps.messaging" && settings.smsAutoReactEnabled) return@launch
             if (pkg !in settings.watchedPackages) return@launch
-            if (!AudioOutputGuard.canPlayReactionNow(applicationContext, settings.headphonesOrBluetoothOnly)) {
-                return@launch
-            }
 
-            val topMatch = graph.embeddingMatcher.rankDialogues(
-                rawQuery = combined,
-                appPackageHint = pkg,
-                requirePlayableAudio = true,
-                topK = 1
-            ).firstOrNull() ?: return@launch
-
-            val threshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
-            if (topMatch.score >= threshold &&
-                TriggerDeduplicator.shouldAllowAutoTrigger(
-                    sourceKey = notifKey,
-                    messageBody = combined,
-                    dialogueId = topMatch.entry.id
-                )
-            ) {
-                graph.audioPlayer.playEntry(topMatch.entry)
-            }
+            graph.incomingMessageReactor.reactToIncoming(
+                source = "Notification",
+                sourceKey = notifKey,
+                sender = title.ifBlank { pkg },
+                messageText = body.ifBlank { title },
+                appPackageHint = pkg
+            )
         }
     }
 

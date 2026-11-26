@@ -46,6 +46,38 @@ class FunctionGemmaRouter(
     @Volatile
     private var pendingAlarmAwaitingTime: Boolean = false
 
+    /**
+     * Executes a structured action returned directly by `GeminiBrainClient`:
+     * `type`: `set_alarm | open_app | dial_call | add_todo | none`.
+     */
+    suspend fun executeGeminiAction(type: String, value: String): ActionExecutionResult = withContext(Dispatchers.IO) {
+        val ml = prefs.snapshot().isMalayalamMode
+        val cleanType = type.trim().lowercase()
+        val cleanVal = value.trim()
+        when (cleanType) {
+            "set_alarm" -> {
+                val parsed = parseMalayalamOrEnglishTime(cleanVal)
+                if (parsed != null) {
+                    setDeviceAlarm(parsed.first, parsed.second, "Malayalam Assistant", ml)
+                } else {
+                    pendingAlarmAwaitingTime = true
+                    openClockAlarmUi()
+                    ActionExecutionResult(
+                        handledAsAction = true,
+                        summaryText = if (ml) "എത്ര മണിക്കാണ് അലാറം വെക്കേണ്ടത്?" else "What time should I set the alarm for?",
+                        reactionQuery = "",
+                        usedFunctionGemma = false,
+                        awaitingFollowUp = true
+                    )
+                }
+            }
+            "open_app" -> if (cleanVal.isNotBlank()) openInstalledApp(cleanVal, ml) else ActionExecutionResult(false, "", "", false)
+            "dial_call", "call" -> dialContactOrNumber(cleanVal, ml)
+            "add_todo", "remind" -> addRoomTodo(cleanVal.ifBlank { "Reminder" }, ml)
+            else -> ActionExecutionResult(false, "", "", false)
+        }
+    }
+
     suspend fun routeAndExecute(userInput: String): ActionExecutionResult = withContext(Dispatchers.IO) {
         val trimmed = userInput.trim()
         if (trimmed.isBlank()) {

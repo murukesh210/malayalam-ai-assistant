@@ -28,6 +28,13 @@ data class UserSettings(
     val hfAuthToken: String = "",
     val speechLocale: String = "ml-IN",
     val ttsVoiceRepliesEnabled: Boolean = true,
+    val speakAfterDialogueClip: Boolean = false,
+    // Google AI Studio (Gemini API) Brain + Expressive TTS
+    val geminiApiKeyEncrypted: String = "",
+    val geminiVoiceName: String = "Kore",
+    // Automatic Bank & Message SMS Auto-Reaction
+    val smsAutoReactEnabled: Boolean = false,
+    // Direct SSL IMAP Gmail Watcher (Android Go / 2 GB RAM)
     val gmailWatcherEnabled: Boolean = false,
     val gmailAddress: String = "",
     val gmailEncryptedAppPassword: String = "",
@@ -37,7 +44,12 @@ data class UserSettings(
     val isMalayalamMode: Boolean
         get() = speechLocale.startsWith("ml")
 
+    val hasGeminiApiKey: Boolean
+        get() = geminiApiKeyEncrypted.isNotBlank()
+
     companion object {
+        val AVAILABLE_GEMINI_VOICES = listOf("Kore", "Puck", "Aoede", "Zephyr", "Fenrir", "Charon")
+
         val DEFAULT_WATCHED_PACKAGES = setOf(
             "com.google.android.gm",
             "com.whatsapp",
@@ -63,6 +75,10 @@ class AppPreferences(private val context: Context) {
         val HF_TOKEN = stringPreferencesKey("hf_auth_token")
         val SPEECH_LOCALE = stringPreferencesKey("speech_locale")
         val TTS_REPLIES = booleanPreferencesKey("tts_voice_replies")
+        val SPEAK_AFTER_CLIP = booleanPreferencesKey("speak_after_dialogue_clip")
+        val GEMINI_API_KEY_ENC = stringPreferencesKey("gemini_api_key_encrypted")
+        val GEMINI_VOICE_NAME = stringPreferencesKey("gemini_voice_name")
+        val SMS_AUTO_REACT = booleanPreferencesKey("sms_auto_react_enabled")
         val GMAIL_WATCHER_ENABLED = booleanPreferencesKey("gmail_watcher_enabled")
         val GMAIL_ADDRESS = stringPreferencesKey("gmail_address")
         val GMAIL_ENC_APP_PASSWORD = stringPreferencesKey("gmail_enc_app_password")
@@ -87,6 +103,10 @@ class AppPreferences(private val context: Context) {
             hfAuthToken = prefs[Keys.HF_TOKEN] ?: "",
             speechLocale = prefs[Keys.SPEECH_LOCALE] ?: "ml-IN",
             ttsVoiceRepliesEnabled = prefs[Keys.TTS_REPLIES] ?: true,
+            speakAfterDialogueClip = prefs[Keys.SPEAK_AFTER_CLIP] ?: false,
+            geminiApiKeyEncrypted = prefs[Keys.GEMINI_API_KEY_ENC] ?: "",
+            geminiVoiceName = prefs[Keys.GEMINI_VOICE_NAME] ?: "Kore",
+            smsAutoReactEnabled = prefs[Keys.SMS_AUTO_REACT] ?: false,
             gmailWatcherEnabled = prefs[Keys.GMAIL_WATCHER_ENABLED] ?: false,
             gmailAddress = prefs[Keys.GMAIL_ADDRESS] ?: "",
             gmailEncryptedAppPassword = prefs[Keys.GMAIL_ENC_APP_PASSWORD] ?: "",
@@ -96,6 +116,29 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun snapshot(): UserSettings = settingsFlow.first()
+
+    suspend fun saveGeminiApiKey(rawKey: String) {
+        val trimmed = rawKey.trim()
+        val encrypted = if (trimmed.isNotEmpty()) CredentialCipher.encrypt(trimmed) else ""
+        context.dataStore.edit { it[Keys.GEMINI_API_KEY_ENC] = encrypted }
+    }
+
+    suspend fun getDecryptedGeminiApiKey(): String {
+        val enc = snapshot().geminiApiKeyEncrypted
+        return CredentialCipher.decrypt(enc)
+    }
+
+    suspend fun setGeminiVoiceName(voice: String) {
+        context.dataStore.edit { it[Keys.GEMINI_VOICE_NAME] = voice }
+    }
+
+    suspend fun setSmsAutoReactEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SMS_AUTO_REACT] = enabled }
+    }
+
+    suspend fun setSpeakAfterDialogueClip(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SPEAK_AFTER_CLIP] = enabled }
+    }
 
     suspend fun setSafTreeUri(uriString: String) {
         context.dataStore.edit { it[Keys.SAF_TREE_URI] = uriString }

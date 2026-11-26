@@ -378,35 +378,19 @@ class GmailDirectWatcherService : Service() {
                 }
                 graph.prefs.updateGmailWatcherProgress(newHighestUid, statusNote)
 
-                val effectiveThreshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
                 for (mail in unseenHeaders) {
-                    val searchBody = mail.combinedSearchText()
-                    if (searchBody.length < 3 || AudioOutputGuard.isLikelyOtp(searchBody)) continue
-                    if (!AudioOutputGuard.canPlayReactionNow(applicationContext, settings.headphonesOrBluetoothOnly)) {
-                        continue
-                    }
-
-                    val winner = graph.embeddingMatcher.rankDialogues(
-                        rawQuery = searchBody,
-                        appPackageHint = "com.google.android.gm",
-                        requirePlayableAudio = true,
-                        topK = 1
-                    ).firstOrNull() ?: continue
-
-                    if (winner.score >= effectiveThreshold &&
-                        TriggerDeduplicator.shouldAllowAutoTrigger(
-                            sourceKey = "gmail_uid_${mail.uid}",
-                            messageBody = searchBody,
-                            dialogueId = winner.entry.id
+                    val reactionNote = graph.incomingMessageReactor.reactToIncoming(
+                        source = "Gmail",
+                        sourceKey = "gmail_uid_${mail.uid}",
+                        sender = mail.from,
+                        messageText = "${mail.subject} ${mail.snippet}",
+                        appPackageHint = "com.google.android.gm"
+                    )
+                    if (!reactionNote.isNullOrBlank()) {
+                        graph.prefs.updateGmailWatcherProgress(
+                            mail.uid,
+                            "$reactionNote • ${mail.subject.take(36)}"
                         )
-                    ) {
-                        val played = graph.audioPlayer.playEntry(winner.entry)
-                        if (played) {
-                            graph.prefs.updateGmailWatcherProgress(
-                                mail.uid,
-                                "Played '${winner.entry.title}' for: ${mail.subject.take(40)}"
-                            )
-                        }
                     }
                 }
             }.onFailure { err ->

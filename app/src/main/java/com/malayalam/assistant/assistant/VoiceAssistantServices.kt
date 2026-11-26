@@ -298,8 +298,49 @@ class AssistantVoiceInteractionSession(context: Context) :
             val settings = graph.prefs.snapshot()
             val ml = settings.isMalayalamMode
             val threshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
+            val screenCtx = uiState.value.capturedScreenText
+                .takeIf { uiState.value.isUsingScreenContext && it.isNotBlank() }
 
-            // 1. Smart Zero-RAM Malayalam + Manglish + English Command Engine
+            // 1. Primary: Google AI Studio Brain + Expressive Malayalam TTS when API key is configured
+            val apiKey = graph.prefs.getDecryptedGeminiApiKey()
+            if (apiKey.isNotBlank()) {
+                val vaultEntries = graph.vaultRepository.dialogues.value
+                val summaries = com.malayalam.assistant.ai.GeminiBrainClient.toVaultSummaries(vaultEntries) {
+                    graph.vaultRepository.hasPlayableAudio(it)
+                }
+                val ai = graph.geminiBrainClient.askWithTextOrAudio(
+                    apiKey = apiKey,
+                    userText = prompt,
+                    screenContext = screenCtx,
+                    vaultDialogues = summaries,
+                    preferMalayalam = ml
+                )
+                if (ai != null) {
+                    if (ai.action.type.isNotBlank() && !ai.action.type.equals("none", ignoreCase = true)) {
+                        graph.functionRouter.executeGeminiAction(ai.action.type, ai.action.value)
+                    }
+                    val replyText = ai.replyMalayalam.ifBlank { if (ml) "ശരി!" else "Done!" }
+                    uiState.value = uiState.value.copy(isThinking = false, assistantResponse = replyText)
+
+                    val matchedClip = ai.playDialogueId?.let { id ->
+                        vaultEntries.firstOrNull { it.id == id && graph.vaultRepository.hasPlayableAudio(it) }
+                    }
+                    val playedClip = matchedClip?.let { graph.audioPlayer.playEntry(it) } == true
+                    if (!playedClip && settings.ttsVoiceRepliesEnabled) {
+                        graph.audioPlayer.speakNaturalReply(
+                            text = replyText,
+                            apiKey = apiKey,
+                            ttsClient = graph.geminiTtsClient,
+                            voiceName = settings.geminiVoiceName,
+                            ttsStyle = ai.ttsStyle,
+                            preferMalayalam = ml
+                        )
+                    }
+                    return@launch
+                }
+            }
+
+            // 2. Offline Fallback: Zero-RAM Malayalam + Manglish + English Command Engine
             val actionResult = graph.functionRouter.routeAndExecute(prompt)
             if (actionResult.handledAsAction) {
                 uiState.value = uiState.value.copy(
@@ -323,9 +364,6 @@ class AssistantVoiceInteractionSession(context: Context) :
                 return@launch
             }
 
-            // 2. Situation Dialogue Match + Natural Reply
-            val screenCtx = uiState.value.capturedScreenText
-                .takeIf { uiState.value.isUsingScreenContext && it.isNotBlank() }
             val topDialogue = graph.embeddingMatcher.rankDialogues(
                 rawQuery = prompt,
                 requirePlayableAudio = true,

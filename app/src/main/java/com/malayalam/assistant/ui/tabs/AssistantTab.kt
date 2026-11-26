@@ -102,11 +102,13 @@ fun MinimalVoiceHomeScreen(
     micRmsLevel: Float,
     backgroundModeActive: Boolean,
     missingBgPermissionHint: Boolean,
+    isIgnoringBatteryOptimizations: Boolean,
     onOrbClick: () -> Unit,
     onStopLiveSession: () -> Unit,
     onStopAudio: () -> Unit,
     onToggleBackgroundMode: () -> Unit,
     onMinimizeToBackground: () -> Unit,
+    onRequestBatteryOptimizationExemption: () -> Unit,
     onOpenBgPermissionsSetup: () -> Unit,
     onOpenVoicePacks: () -> Unit,
     onOpenDrawer: () -> Unit,
@@ -278,6 +280,22 @@ fun MinimalVoiceHomeScreen(
                 .padding(bottom = 18.dp, start = 16.dp, end = 64.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            if (!isIgnoringBatteryOptimizations) {
+                Text(
+                    text = "⚡ Fix Background Lag (Disable Battery Optimization)",
+                    color = Color(0xFF1A1200),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .padding(bottom = 8.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(GeminiAmber)
+                        .clickable(onClick = onRequestBatteryOptimizationExemption)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+
             if (backgroundModeActive && missingBgPermissionHint) {
                 Text(
                     text = "⚠️ Grant Notification / SMS Access → Tap here",

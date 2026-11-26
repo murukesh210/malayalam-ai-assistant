@@ -29,4 +29,16 @@ object SharedGeminiHttp {
             .writeTimeout(6, TimeUnit.SECONDS)
             .build()
     }
+
+    /**
+     * Ultra-tight timeout client for Tier-2 Background Notification semantic matching (~0.8s-1.2s).
+     * Reuses the same HTTP/2 ConnectionPool for warm TLS sockets.
+     */
+    val ultraFastNotificationClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .writeTimeout(4, TimeUnit.SECONDS)
+            .build()
+    }
 }

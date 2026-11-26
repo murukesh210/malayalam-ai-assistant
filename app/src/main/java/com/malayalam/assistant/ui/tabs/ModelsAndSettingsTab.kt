@@ -91,12 +91,14 @@ fun ModelsAndSettingsTab(
     modelStates: Map<ManagedModelId, ModelInstallState>,
     isNotificationAccessEnabled: Boolean,
     isSmsPermissionGranted: Boolean,
+    isIgnoringBatteryOptimizations: Boolean,
     geminiKeyTestResult: String,
     lastApiDebugStatus: String,
     liveMonitorLogs: List<LiveNotificationLogEntry>,
     whatsappSimStatus: String,
     gmailTestResult: String,
     onBack: () -> Unit,
+    onRequestBatteryOptimizationExemption: () -> Unit,
     onSaveGeminiApiKey: (String) -> Unit,
     onTestGeminiApiKey: (String) -> Unit,
     onSelectGeminiVoice: (String) -> Unit,
@@ -312,6 +314,29 @@ fun ModelsAndSettingsTab(
                         checked = settings.alwaysOnKeepAliveEnabled,
                         onCheckedChange = onToggleAlwaysOnKeepAlive
                     )
+
+                    if (!isIgnoringBatteryOptimizations) {
+                        Spacer(Modifier.height(6.dp))
+                        Button(
+                            onClick = onRequestBatteryOptimizationExemption,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = GeminiAmber)
+                        ) {
+                            Text(
+                                text = "⚡ Fix Background Lag (Disable Battery Optimization)",
+                                color = Color(0xFF1A1200),
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "✅ Battery Optimization Disabled — Zero-Lag Instant Reactions Active",
+                            color = GeminiMint,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                    }
 
                     SettingToggleRow(
                         title = "Auto-React to Bank & Message SMS",

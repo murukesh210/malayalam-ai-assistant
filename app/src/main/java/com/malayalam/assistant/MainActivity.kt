@@ -1,11 +1,13 @@
 package com.malayalam.assistant
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -106,6 +108,9 @@ class MainActivity : ComponentActivity() {
                 var smsPermGranted by remember {
                     mutableStateOf(hasSmsPermissions())
                 }
+                var isIgnoringBatteryOpt by remember {
+                    mutableStateOf(checkIgnoringBatteryOptimizations())
+                }
 
                 val lifecycleOwner = LocalLifecycleOwner.current
                 DisposableEffect(lifecycleOwner) {
@@ -113,6 +118,7 @@ class MainActivity : ComponentActivity() {
                         if (event == Lifecycle.Event.ON_RESUME) {
                             notifEnabled = AudioOutputGuard.isNotificationAccessGranted(this@MainActivity)
                             smsPermGranted = hasSmsPermissions()
+                            isIgnoringBatteryOpt = checkIgnoringBatteryOptimizations()
                         } else if (event == Lifecycle.Event.ON_STOP) {
                             stopFallbackMic()
                             isFallbackMicListening = false
@@ -389,6 +395,7 @@ class MainActivity : ComponentActivity() {
                             micRmsLevel = continuousMicRms,
                             backgroundModeActive = settings.backgroundModeActive,
                             missingBgPermissionHint = !notifEnabled && !smsPermGranted,
+                            isIgnoringBatteryOptimizations = isIgnoringBatteryOpt,
                             onOrbClick = {
                                 val hasMicPerm = ContextCompat.checkSelfPermission(
                                     this@MainActivity,
@@ -430,6 +437,7 @@ class MainActivity : ComponentActivity() {
                                 viewModel.toggleBackgroundMode()
                             },
                             onMinimizeToBackground = { moveTaskToBack(true) },
+                            onRequestBatteryOptimizationExemption = ::requestBatteryOptimizationExemption,
                             onOpenBgPermissionsSetup = { destination = AppDestination.MODELS_SETTINGS },
                             onOpenVoicePacks = { destination = AppDestination.VOICE_PACKS },
                             onOpenDrawer = { uiScope.launch { drawerState.open() } },
@@ -521,12 +529,14 @@ class MainActivity : ComponentActivity() {
                             modelStates = modelStates,
                             isNotificationAccessEnabled = notifEnabled,
                             isSmsPermissionGranted = smsPermGranted,
+                            isIgnoringBatteryOptimizations = isIgnoringBatteryOpt,
                             geminiKeyTestResult = geminiKeyTestResult,
                             lastApiDebugStatus = lastApiDebugStatus,
                             liveMonitorLogs = liveMonitorLogs,
                             whatsappSimStatus = whatsappSimStatus,
                             gmailTestResult = gmailTestResult,
                             onBack = { destination = AppDestination.HOME_ORB },
+                            onRequestBatteryOptimizationExemption = ::requestBatteryOptimizationExemption,
                             onSaveGeminiApiKey = viewModel::saveGeminiApiKey,
                             onTestGeminiApiKey = viewModel::testGeminiApiKey,
                             onSelectGeminiVoice = viewModel::setGeminiVoiceName,
@@ -598,6 +608,26 @@ class MainActivity : ComponentActivity() {
 
     private fun hasSmsPermissions(): Boolean {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun checkIgnoringBatteryOptimizations(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    @android.annotation.SuppressLint("BatteryLife")
+    private fun requestBatteryOptimizationExemption() {
+        runCatching {
+            val intent = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        }.onFailure {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }
+        }
     }
 
     private fun requestActionPermissionsIfNeeded(launchPerms: (Array<String>) -> Unit) {

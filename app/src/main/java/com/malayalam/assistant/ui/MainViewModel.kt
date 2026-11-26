@@ -472,12 +472,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 graph.voicePackRepository.importPackFromZip(uri)
             }.onSuccess { res ->
-                _packBannerMessage.value = "✅ Imported '${res.pack.packName}' (${res.importedAudioCount} audio clips)!"
+                val summary = "Imported '${res.pack.packName}' (${res.importedAudioCount} audio clips linked)"
+                _packBannerMessage.value = "✅ $summary"
+                android.widget.Toast.makeText(appContext, summary, android.widget.Toast.LENGTH_LONG).show()
                 _importedPackNeedingAiTagId.value = if (res.missingManifestAutoCreated && res.importedAudioCount > 0) {
                     res.pack.packId
                 } else null
             }.onFailure { err ->
-                _packBannerMessage.value = "❌ Import failed: ${err.message?.take(60)}"
+                val reason = err.message?.take(120) ?: "Invalid ZIP archive"
+                _packBannerMessage.value = "❌ Import failed: $reason"
+                android.widget.Toast.makeText(appContext, "Import failed: $reason", android.widget.Toast.LENGTH_LONG).show()
             }
         }
     }

@@ -230,9 +230,12 @@ class VoicePackRepository(
         }
 
     /**
-     * Imports a `.zip` or `.mlpack` archive via standard `java.util.zip.ZipInputStream`:
-     *  - Extracts `pack.json` and all `.mp3`/`.wav`/`.ogg`/`.m4a` clips safely into `filesDir/packs/<packId>/audio/`.
-     *  - If the archive contains only audio clips (no `pack.json`), auto-creates a pack named after the ZIP file
+     * Foolproof `.zip` / `.mlpack` importer via standard `java.util.zip.ZipInputStream`:
+     *  - Handles BOTH flat ZIPs (`pack.json` at root) AND folder-wrapped ZIPs (`Mammootty_Pack/pack.json`
+     *    and `Mammootty_Pack/audio/clip.mp3` created by Windows/Android file managers).
+     *  - Ignores macOS/Windows junk (`__MACOSX/`, `._*`, `.DS_Store`, `Thumbs.db`).
+     *  - Matches audio clips flexibly by normalized relative path, `audio/<file>`, OR filename fallback.
+     *  - If NO `pack.json` exists, auto-creates a Voice Pack named after the ZIP file and links every clip
      *    so the user can tap **"✨ Auto-Listen & Tag All Clips with AI"**!
      */
     suspend fun importPackFromZip(sourceUri: Uri): PackImportResult = withContext(Dispatchers.IO) {
@@ -251,94 +254,158 @@ class VoicePackRepository(
         val canonicalRoot = targetDir.canonicalPath
 
         var manifestJsonText: String? = null
+        var manifestEntryParentPrefix = ""
         val extractedAudioFiles = mutableListOf<File>()
+        val audioByNormalizedRelPath = mutableMapOf<String, File>()
+        val audioByBaseName = mutableMapOf<String, File>()
+        val usedOutNames = mutableSetOf<String>()
 
-        context.contentResolver.openInputStream(sourceUri)?.use { input ->
-            ZipInputStream(input).use { zis ->
-                var entry: ZipEntry? = zis.nextEntry
-                while (entry != null) {
-                    if (!entry.isDirectory) {
-                        val entryFileName = File(entry.name).name
-                        val lower = entryFileName.lowercase()
-                        if (lower == "pack.json") {
-                            manifestJsonText = zis.readBytes().toString(Charsets.UTF_8)
-                        } else if (SUPPORTED_EXTS.any { lower.endsWith(it) }) {
-                            val safeName = sanitizeAudioName(entryFileName)
-                            val outFile = File(audioDir, safeName)
-                            if (outFile.canonicalPath.startsWith(canonicalRoot)) {
-                                outFile.outputStream().use { out -> zis.copyTo(out, bufferSize = 16 * 1024) }
-                                extractedAudioFiles.add(outFile)
+        try {
+            context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                ZipInputStream(input).use { zis ->
+                    var entry: ZipEntry? = zis.nextEntry
+                    while (entry != null) {
+                        val rawEntryPath = entry.name.replace('\\', '/').trimStart('/')
+                        val segments = rawEntryPath.split('/').filter { it.isNotBlank() }
+                        val entryFileName = segments.lastOrNull().orEmpty()
+                        val lowerName = entryFileName.lowercase()
+
+                        val isJunk = entry.isDirectory ||
+                            entryFileName.isBlank() ||
+                            segments.any { it.equals("__MACOSX", ignoreCase = true) || it == ".." } ||
+                            entryFileName.startsWith("._") ||
+                            lowerName == ".ds_store" ||
+                            lowerName == "thumbs.db" ||
+                            lowerName == "desktop.ini"
+
+                        if (!isJunk) {
+                            if (lowerName == "pack.json") {
+                                manifestJsonText = zis.readBytes().toString(Charsets.UTF_8)
+                                manifestEntryParentPrefix = if (segments.size > 1) {
+                                    segments.dropLast(1).joinToString("/") + "/"
+                                } else ""
+                            } else if (SUPPORTED_EXTS.any { lowerName.endsWith(it) }) {
+                                var safeName = sanitizeAudioName(entryFileName)
+                                if (!usedOutNames.add(safeName.lowercase())) {
+                                    val stem = safeName.substringBeforeLast('.')
+                                    val ext = safeName.substringAfterLast('.', "mp3")
+                                    safeName = "${stem}_${extractedAudioFiles.size + 1}.$ext"
+                                    usedOutNames.add(safeName.lowercase())
+                                }
+                                val outFile = File(audioDir, safeName)
+                                if (outFile.canonicalPath.startsWith(canonicalRoot)) {
+                                    outFile.outputStream().use { out -> zis.copyTo(out, bufferSize = 16 * 1024) }
+                                    extractedAudioFiles.add(outFile)
+                                    audioByNormalizedRelPath[rawEntryPath.lowercase()] = outFile
+                                    audioByBaseName.putIfAbsent(lowerName, outFile)
+                                    audioByBaseName.putIfAbsent(safeName.lowercase(), outFile)
+                                }
                             }
                         }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
                     }
-                    zis.closeEntry()
-                    entry = zis.nextEntry
                 }
+            } ?: throw IllegalArgumentException("Cannot open selected ZIP archive.")
+
+            if (manifestJsonText == null && extractedAudioFiles.isEmpty()) {
+                throw IllegalArgumentException("No pack.json or supported audio clips (.mp3/.wav/.ogg/.m4a) found in ZIP.")
             }
-        } ?: error("Cannot open selected pack archive.")
 
-        val parsedManifest = manifestJsonText?.let { raw ->
-            runCatching { json.decodeFromString<VoicePack>(raw) }.getOrNull()
-        }
-
-        val audioByName = extractedAudioFiles.associateBy { it.name.lowercase() }
-        val finalPack: VoicePack
-        val missingManifest: Boolean
-
-        if (parsedManifest != null) {
-            missingManifest = false
-            val linkedDialogues = parsedManifest.dialogues.map { d ->
-                val matchedFile = audioByName[d.fileName.lowercase()]
-                    ?: audioByName[sanitizeAudioName(d.fileName).lowercase()]
-                if (matchedFile != null) {
-                    d.copy(fileName = matchedFile.name, safUriString = Uri.fromFile(matchedFile).toString())
-                } else d
+            // Build secondary relative-path map stripped of the folder-wrapped root prefix (e.g. "Mammootty_Pack/")
+            val audioByRootStrippedPath = mutableMapOf<String, File>()
+            val prefixLower = manifestEntryParentPrefix.lowercase()
+            for ((rel, file) in audioByNormalizedRelPath) {
+                val stripped = if (prefixLower.isNotBlank() && rel.startsWith(prefixLower)) {
+                    rel.removePrefix(prefixLower)
+                } else rel
+                audioByRootStrippedPath[stripped] = file
             }
-            finalPack = parsedManifest.copy(
-                packId = tempId,
-                packName = parsedManifest.packName.ifBlank { cleanBaseName },
-                dialogues = linkedDialogues,
-                updatedAtEpochMs = System.currentTimeMillis()
-            )
-        } else {
-            missingManifest = true
-            val rawDialogues = extractedAudioFiles.map { file ->
-                val prettyTitle = file.nameWithoutExtension.replace(Regex("[_-]+"), " ").trim()
-                DialogueEntry(
-                    id = UUID.randomUUID().toString(),
-                    fileName = file.name,
-                    safUriString = Uri.fromFile(file).toString(),
-                    title = prettyTitle.ifBlank { file.name },
-                    heardText = "",
-                    category = SituationCategory.CUSTOM.id,
-                    situations = listOf(prettyTitle),
-                    scope = "specific"
+
+            val parsedManifest: VoicePack? = manifestJsonText?.let { raw ->
+                runCatching { json.decodeFromString<VoicePack>(raw.trimStart('\uFEFF')) }
+                    .getOrElse { parseErr ->
+                        throw IllegalArgumentException("Invalid pack.json: ${parseErr.message?.take(70) ?: "malformed JSON"}")
+                    }
+            }
+
+            val finalPack: VoicePack
+            val missingManifest: Boolean
+            val linkedAudioCount: Int
+
+            if (parsedManifest != null) {
+                missingManifest = false
+                var linked = 0
+                val linkedDialogues = parsedManifest.dialogues.map { d ->
+                    val rawRef = d.fileName.replace('\\', '/').trimStart('/')
+                    val rawRefLower = rawRef.lowercase()
+                    val baseName = rawRef.substringAfterLast('/').lowercase()
+                    val sanitizedBase = sanitizeAudioName(baseName).lowercase()
+
+                    val matchedFile = audioByRootStrippedPath[rawRefLower]
+                        ?: audioByRootStrippedPath["audio/$baseName"]
+                        ?: audioByNormalizedRelPath[rawRefLower]
+                        ?: audioByBaseName[baseName]
+                        ?: audioByBaseName[sanitizedBase]
+
+                    if (matchedFile != null) {
+                        linked++
+                        d.copy(fileName = matchedFile.name, safUriString = Uri.fromFile(matchedFile).toString())
+                    } else d
+                }
+                linkedAudioCount = linked
+                finalPack = parsedManifest.copy(
+                    packId = tempId,
+                    packName = parsedManifest.packName.ifBlank { cleanBaseName },
+                    dialogues = linkedDialogues,
+                    updatedAtEpochMs = System.currentTimeMillis()
+                )
+            } else {
+                missingManifest = true
+                linkedAudioCount = extractedAudioFiles.size
+                val rawDialogues = extractedAudioFiles.map { file ->
+                    val prettyTitle = file.nameWithoutExtension.replace(Regex("[_-]+"), " ").trim()
+                    DialogueEntry(
+                        id = UUID.randomUUID().toString(),
+                        fileName = file.name,
+                        safUriString = Uri.fromFile(file).toString(),
+                        title = prettyTitle.ifBlank { file.name },
+                        heardText = "",
+                        category = SituationCategory.CUSTOM.id,
+                        situations = listOf(prettyTitle),
+                        scope = "specific"
+                    )
+                }
+                finalPack = VoicePack(
+                    packId = tempId,
+                    packName = cleanBaseName,
+                    actor = cleanBaseName,
+                    ttsVoice = prefs.snapshot().geminiVoiceName,
+                    personaInstruction = "Witty Malayalam style inspired by $cleanBaseName.",
+                    dialogues = rawDialogues
                 )
             }
-            finalPack = VoicePack(
-                packId = tempId,
-                packName = cleanBaseName,
-                actor = cleanBaseName,
-                ttsVoice = prefs.snapshot().geminiVoiceName,
-                personaInstruction = "Witty Malayalam style inspired by $cleanBaseName.",
-                dialogues = rawDialogues
+
+            mutex.withLock {
+                writePackJsonUnlocked(finalPack)
+                _packs.value = _packs.value + finalPack
+                _activePackId.value = finalPack.packId
+                prefs.setActivePackId(finalPack.packId)
+                if (finalPack.ttsVoice.isNotBlank()) {
+                    prefs.setGeminiVoiceName(finalPack.ttsVoice)
+                }
+                refreshActiveDialoguesUnlocked()
+            }
+
+            PackImportResult(
+                pack = finalPack,
+                importedAudioCount = linkedAudioCount,
+                missingManifestAutoCreated = missingManifest
             )
+        } catch (t: Throwable) {
+            runCatching { targetDir.deleteRecursively() }
+            throw t
         }
-
-        mutex.withLock {
-            writePackJsonUnlocked(finalPack)
-            _packs.value = _packs.value + finalPack
-            _activePackId.value = finalPack.packId
-            prefs.setActivePackId(finalPack.packId)
-            prefs.setGeminiVoiceName(finalPack.ttsVoice)
-            refreshActiveDialoguesUnlocked()
-        }
-
-        PackImportResult(
-            pack = finalPack,
-            importedAudioCount = extractedAudioFiles.size,
-            missingManifestAutoCreated = missingManifest
-        )
     }
 
     /**

@@ -153,7 +153,66 @@ class GeminiBrainClient {
     }
 
     /**
-     * Fast incoming message reactor for WhatsApp, SMS (bank credit/debit), Gmail, and App Notifications.
+     * Tier-2 Ultra-Fast Slim Cloud Semantic Matcher for Background Notifications (~0.8s–1.2s):
+     *  - Sends ZERO chat history and an ultra-compact `id|scope|whenToPlay` catalogue.
+     *  - Uses `gemini-3.5-flash-lite` + `thinkingConfig: { thinkingLevel: "minimal" }` + `maxOutputTokens: 90`
+     *    over the shared keep-alive pool with tight `connectTimeout = 3s` / `readTimeout = 5s`.
+     */
+    suspend fun analyzeNotificationFast(
+        apiKey: String,
+        sender: String,
+        messageText: String,
+        vaultDialogues: List<VaultDialogueSummary>,
+        packPersonaInstruction: String = ""
+    ): GeminiBrainResponse? = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isBlank()) return@withContext null
+
+        val compactCatalog = vaultDialogues
+            .filter { it.hasAudio }
+            .joinToString("\n") { d ->
+                val triggers = d.situations.take(6).joinToString(", ").replace("\n", " ")
+                "${d.id}|${d.scope}|${d.title}: $triggers"
+            }
+            .ifBlank { "NONE" }
+
+        val personaHint = packPersonaInstruction.take(90).ifBlank { "Witty Malayalam friend." }
+        val systemInstruction = """
+            Match incoming message to a playable clip OR short 1-sentence Malayalam reply ($personaHint).
+            Clips (id|scope|name: whenToPlay):
+            $compactCatalog
+            Rules:
+            - shouldReact=false ONLY for OTP/spam/ads/promos. true for bank/UPI/exam/personal messages.
+            - Prefer scope=specific over scope=broad. Use broad mood ONLY if no specific clip fits.
+            - NEVER mismatch opposites (pass!=fail, credit!=debit).
+            - Return ONLY JSON: {"shouldReact":true,"playDialogueId":null,"replyMalayalam":"...","ttsStyle":"cheerful"}
+        """.trimIndent()
+
+        val contents = buildJsonArray {
+            add(buildJsonObject {
+                put("role", "user")
+                put("parts", buildJsonArray {
+                    add(buildJsonObject {
+                        put("text", """{"sender":"${sender.take(40).replace("\"", "'")}","text":"${messageText.take(260).replace("\"", "'")}"}""")
+                    })
+                })
+            })
+        }
+
+        val rawText = callWithModelFallback(
+            apiKey = cleanKey,
+            systemInstruction = systemInstruction,
+            contents = contents,
+            temperature = 0.2,
+            maxTokens = 90,
+            client = SharedGeminiHttp.ultraFastNotificationClient
+        ) ?: return@withContext null
+
+        parseBrainJson(rawText)
+    }
+
+    /**
+     * Fast incoming message reactor for Test Simulator / rich diagnostics.
      */
     suspend fun analyzeIncomingMessage(
         apiKey: String,

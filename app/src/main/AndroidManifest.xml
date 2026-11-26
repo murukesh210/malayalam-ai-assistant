@@ -5,6 +5,10 @@
     <!-- Network for Google AI Studio (Gemini Brain + TTS), Gmail Direct Watcher, and optional model downloads -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Battery optimization exemption for zero-lag instant background reactions -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- Live Voice Input (AudioRecord VAD + SpeechRecognizer fallback) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />

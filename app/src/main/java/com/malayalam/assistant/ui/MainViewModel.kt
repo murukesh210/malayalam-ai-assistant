@@ -5,18 +5,25 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.malayalam.assistant.AppGraph
+import com.malayalam.assistant.ai.EmbeddingMatcherEngine
 import com.malayalam.assistant.ai.ManagedModelId
+import com.malayalam.assistant.data.AppPreferences
 import com.malayalam.assistant.data.DialogueEntry
 import com.malayalam.assistant.data.MatchCandidate
 import com.malayalam.assistant.data.PendingReviewEntity
 import com.malayalam.assistant.data.UserSettings
+import com.malayalam.assistant.service.GmailDirectWatcherService
+import com.malayalam.assistant.service.GmailImapClient
 import com.malayalam.assistant.worker.AudioAutoOrganizeWorker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 data class ChatTurn(
@@ -32,16 +39,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val graph = AppGraph.from(application)
     private val appContext = application.applicationContext
 
+    val isDevice2GbClass: Boolean = AppPreferences.isDevice2GbClass(appContext)
+    val isAndroidGoDevice: Boolean = AppPreferences.isAndroidGoDevice(appContext)
+
     val ramStatus = graph.modelCoordinator.ramStatus
     val playbackState = graph.audioPlayer.playbackState
     val dialogues = graph.vaultRepository.dialogues
     val pipelineProgress = graph.pipelineTracker.state
     val modelStates = graph.modelDownloadManager.states
 
+    /**
+     * Off-main-thread map of `dialogueId -> isAudioLinkedAndReadable` so Dialogue Vault
+     * shows `✅ Audio linked` vs `⚠️ Tap to pick MP3` cleanly.
+     */
+    val playableAudioMap: StateFlow<Map<String, Boolean>> = dialogues
+        .map { list ->
+            withContext(Dispatchers.IO) {
+                list.associate { entry -> entry.id to graph.vaultRepository.hasPlayableAudio(entry) }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
     val settings = graph.prefs.settingsFlow.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = UserSettings(lowRamSafeMode = graph.prefs.defaultLowRamMode)
+        initialValue = UserSettings(
+            lowRamSafeMode = graph.prefs.defaultLowRamMode,
+            ultraLight2GbMode = graph.prefs.defaultUltraLight2Gb
+        )
     )
 
     val todos = graph.db.todoDao().observeTodos().stateIn(
@@ -56,15 +81,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = emptyList()
     )
 
-    private val _chatHistory = MutableStateFlow(
-        listOf(
-            ChatTurn(
-                isUser = false,
-                text = "Namaskaram! I'm your 4 GB-safe offline Malayalam AI assistant. Ask me to set an alarm, add a to-do, call someone, open an app, or drop Malayalam audio clips in Dialogue Vault so I can react to notifications!",
-                badge = "One-Model-at-a-Time Ready"
-            )
-        )
-    )
+    private val _heroGreetingOrReply = MutableStateFlow("നമസ്കാരം")
+    val heroGreetingOrReply: StateFlow<String> = _heroGreetingOrReply.asStateFlow()
+
+    private val _chatHistory = MutableStateFlow<List<ChatTurn>>(emptyList())
     val chatHistory: StateFlow<List<ChatTurn>> = _chatHistory.asStateFlow()
 
     private val _isChatBusy = MutableStateFlow(false)
@@ -76,49 +96,91 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _vaultBannerMessage = MutableStateFlow("")
     val vaultBannerMessage: StateFlow<String> = _vaultBannerMessage.asStateFlow()
 
+    private val _gmailTestResult = MutableStateFlow("")
+    val gmailTestResult: StateFlow<String> = _gmailTestResult.asStateFlow()
+
+    fun updateLivePartialSpeech(partial: String) {
+        if (partial.isNotBlank()) {
+            _heroGreetingOrReply.value = partial
+        }
+    }
+
+    fun resetGreetingToNamaskaram() {
+        _heroGreetingOrReply.value = if (settings.value.isMalayalamMode) "നമസ്കാരം" else "Namaskaram"
+    }
+
     fun sendChatOrAction(rawInput: String) {
         val text = rawInput.trim()
         if (text.isBlank() || _isChatBusy.value) return
 
-        _chatHistory.value = _chatHistory.value + ChatTurn(isUser = true, text = text)
+        _chatHistory.value = (_chatHistory.value + ChatTurn(isUser = true, text = text)).takeLast(40)
         _isChatBusy.value = true
 
         viewModelScope.launch {
             try {
-                // 1. Check daily actions via FunctionGemma (270M)
+                val curSettings = settings.value
+                val ml = curSettings.isMalayalamMode
+                val threshold = curSettings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
+
+                // 1. Smart Zero-RAM Malayalam + Manglish + English Command Engine
                 val action = graph.functionRouter.routeAndExecute(text)
                 if (action.handledAsAction) {
-                    val reaction = graph.embeddingMatcher.rankDialogues(
-                        rawQuery = "${action.reactionQuery} $text",
-                        topK = 1
-                    ).firstOrNull()?.takeIf { it.score >= 0.45f }
+                    _heroGreetingOrReply.value = action.summaryText
 
-                    reaction?.let { graph.audioPlayer.playEntry(it.entry) }
+                    var playedClipTitle: String? = null
+                    if (!action.awaitingFollowUp && action.reactionQuery.isNotBlank()) {
+                        val reaction = graph.embeddingMatcher.rankDialogues(
+                            rawQuery = "${action.reactionQuery} $text",
+                            requirePlayableAudio = true,
+                            topK = 1
+                        ).firstOrNull()?.takeIf { it.score >= threshold }
 
-                    _chatHistory.value = _chatHistory.value + ChatTurn(
+                        if (reaction != null && graph.audioPlayer.playEntry(reaction.entry)) {
+                            playedClipTitle = reaction.entry.title
+                        }
+                    }
+
+                    if (playedClipTitle == null && curSettings.ttsVoiceRepliesEnabled) {
+                        graph.audioPlayer.speakShortReplyIfIdle(action.summaryText, preferMalayalam = ml)
+                    }
+
+                    _chatHistory.value = (_chatHistory.value + ChatTurn(
                         isUser = false,
                         text = action.summaryText,
-                        badge = if (action.usedFunctionGemma) "FunctionGemma 270M" else "Instant Offline Router",
-                        triggeredClipTitle = reaction?.entry?.title
-                    )
+                        badge = if (action.usedFunctionGemma) "FunctionGemma 270M" else "Smart Offline",
+                        triggeredClipTitle = playedClipTitle
+                    )).takeLast(40)
                     return@launch
                 }
 
-                // 2. Match Malayalam reaction clip + run Gemma 3 1B light reply
-                val threshold = settings.value.matchThreshold
-                val matched = graph.embeddingMatcher.rankDialogues(text, topK = 1)
-                    .firstOrNull()
-                    ?.takeIf { it.score >= threshold }
+                // 2. Direct Situation / Movie Dialogue Trigger in Voice or Chat
+                val matched = graph.embeddingMatcher.rankDialogues(
+                    rawQuery = text,
+                    requirePlayableAudio = true,
+                    topK = 1
+                ).firstOrNull()?.takeIf { it.score >= threshold }
 
-                matched?.let { graph.audioPlayer.playEntry(it.entry) }
+                var playedClipTitle: String? = null
+                if (matched != null && graph.audioPlayer.playEntry(matched.entry)) {
+                    playedClipTitle = matched.entry.title
+                }
 
-                val reply = graph.gemmaSituationEngine.generateAssistantReply(userMessage = text)
-                _chatHistory.value = _chatHistory.value + ChatTurn(
+                val reply = graph.gemmaSituationEngine.generateAssistantReply(
+                    userMessage = text,
+                    matchedDialogueTitle = playedClipTitle
+                )
+                _heroGreetingOrReply.value = reply
+
+                if (playedClipTitle == null && curSettings.ttsVoiceRepliesEnabled) {
+                    graph.audioPlayer.speakShortReplyIfIdle(reply, preferMalayalam = ml)
+                }
+
+                _chatHistory.value = (_chatHistory.value + ChatTurn(
                     isUser = false,
                     text = reply,
-                    badge = if (graph.modelDownloadManager.isModelReady(ManagedModelId.GEMMA_3_1B)) "Gemma 3 1B (CPU XNNPACK)" else "Lightweight Fallback",
-                    triggeredClipTitle = matched?.entry?.title
-                )
+                    badge = if (playedClipTitle != null) "Malayalam Clip" else "Assistant",
+                    triggeredClipTitle = playedClipTitle
+                )).takeLast(40)
             } finally {
                 _isChatBusy.value = false
             }
@@ -135,7 +197,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val next = if (settings.value.speechLocale == "ml-IN") "en-IN" else "ml-IN"
             graph.prefs.setSpeechLocale(next)
+            if (!playbackState.value.isPlaying) {
+                _heroGreetingOrReply.value = if (next == "ml-IN") "നമസ്കാരം" else "Namaskaram"
+            }
         }
+    }
+
+    fun setTtsRepliesEnabled(enabled: Boolean) {
+        viewModelScope.launch { graph.prefs.setTtsRepliesEnabled(enabled) }
     }
 
     fun toggleTodoDone(id: Long, done: Boolean) {
@@ -146,12 +215,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { graph.db.todoDao().deleteTodo(id) }
     }
 
-    // --- Dialogue Vault & SAF Pipeline ---
+    // --- Dialogue Vault & 1-Tap Direct Audio Linking ---
 
     fun bindSafFolder(uri: Uri) {
         viewModelScope.launch {
             val existingCount = graph.vaultRepository.bindSafFolder(uri)
-            _vaultBannerMessage.value = "SAF Vault linked (.nomedia active, $existingCount dialogues loaded)."
+            _vaultBannerMessage.value = "SAF Vault linked (.nomedia active, $existingCount dialogues ready)."
+        }
+    }
+
+    fun attachAudioToExistingDialogue(dialogueId: String, sourceUri: Uri) {
+        viewModelScope.launch {
+            val updated = graph.vaultRepository.attachAudioToDialogue(dialogueId, sourceUri)
+            if (updated != null) {
+                _vaultBannerMessage.value = "✅ Linked ${updated.fileName} to '${updated.title}'"
+                graph.audioPlayer.playEntry(updated)
+            } else {
+                _vaultBannerMessage.value = "Could not attach selected audio file."
+            }
         }
     }
 
@@ -162,7 +243,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _vaultBannerMessage.value = "Could not copy audio clip."
                 return@launch
             }
-            _vaultBannerMessage.value = "Queued ${copied.first} for Malayalam AI listening..."
+            // On 2 GB Ultra-Light devices without ASR/Gemma downloaded, create & link immediately OR queue worker
+            _vaultBannerMessage.value = "Analyzing & linking ${copied.first}..."
             AudioAutoOrganizeWorker.enqueueSequentialClips(appContext, listOf(copied))
         }
     }
@@ -173,7 +255,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val unorganized = graph.vaultRepository.findUnorganizedAudioFiles(pendingNames)
             if (unorganized.isEmpty()) {
                 _vaultBannerMessage.value = if (settings.value.safTreeUri.isBlank()) {
-                    "Pick your Documents/MalayalamAssistant/ folder first."
+                    "Select a folder first, or tap '+ Add Dialogue' / '⚠️ Tap to pick MP3' on any card."
                 } else {
                     "All audio clips in folder are already organized!"
                 }
@@ -201,7 +283,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 situations = editedSituations.filter { it.isNotBlank() },
                 recommendedApps = item.recommendedAppsCsv.split(",").map { it.trim() }.filter { it.isNotBlank() }
             )
-            // Re-embed if situations changed & EmbeddingGemma is downloaded, else use cached vector
             val cachedVec = runCatching {
                 if (item.cachedVectorJson.isNotBlank()) {
                     Json.decodeFromString<List<Float>>(item.cachedVectorJson).toFloatArray()
@@ -236,7 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 graph.vaultRepository.upsertDialogue(entry, cachedVec)
             }
             graph.db.pendingReviewDao().clearAll()
-            _vaultBannerMessage.value = "Accepted ${all.size} dialogue(s) into dialogues.json!"
+            _vaultBannerMessage.value = "Accepted ${all.size} dialogue(s)!"
         }
     }
 
@@ -266,7 +347,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playDialogue(entry: DialogueEntry) {
-        graph.audioPlayer.playEntry(entry)
+        val ok = graph.audioPlayer.playEntry(entry)
+        if (!ok) {
+            _vaultBannerMessage.value = "⚠️ Attach an MP3/WAV clip to '${entry.title}' first!"
+        }
     }
 
     fun playRawUri(uriString: String, id: String, title: String, transcript: String) {
@@ -282,9 +366,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val top3 = graph.embeddingMatcher.rankDialogues(rawQuery = testPhrase, topK = 3)
             _simulatorResults.value = top3
+            val threshold = settings.value.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
             val winner = top3.firstOrNull()
-            if (winner != null) {
-                graph.audioPlayer.playEntry(winner.entry)
+            if (winner != null && winner.score >= threshold) {
+                val played = graph.audioPlayer.playEntry(winner.entry)
+                if (!played) {
+                    _vaultBannerMessage.value = "Matched '${winner.entry.title}' (${String.format("%.2f", winner.score)}) — tap '⚠️ Tap to pick MP3' to attach audio!"
+                }
+            }
+        }
+    }
+
+    // --- Gmail Direct Watcher (Android Go / 2 GB RAM Email Detection) ---
+
+    fun saveGmailConfig(email: String, appPasswordInput: String) {
+        viewModelScope.launch {
+            graph.prefs.saveGmailCredentials(email, appPasswordInput)
+            _gmailTestResult.value = "Saved Gmail credentials securely."
+            if (settings.value.gmailWatcherEnabled) {
+                GmailDirectWatcherService.syncServiceState(appContext, true)
+            }
+        }
+    }
+
+    fun setGmailWatcherEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            graph.prefs.setGmailWatcherEnabled(enabled)
+            GmailDirectWatcherService.syncServiceState(appContext, enabled)
+        }
+    }
+
+    fun testGmailAndCheckLatest(emailDraft: String, passwordDraft: String) {
+        viewModelScope.launch {
+            _gmailTestResult.value = "Connecting to imap.gmail.com:993..."
+            if (emailDraft.isNotBlank() && passwordDraft.isNotBlank()) {
+                graph.prefs.saveGmailCredentials(emailDraft, passwordDraft)
+            }
+            val activeEmail = emailDraft.trim().ifBlank { settings.value.gmailAddress }
+            val activePass = if (passwordDraft.isNotBlank()) {
+                passwordDraft.replace(" ", "").trim()
+            } else {
+                graph.prefs.getDecryptedGmailAppPassword()
+            }
+
+            runCatching {
+                val (latestUid, header) = GmailImapClient.testConnectionAndFetchLatest(activeEmail, activePass)
+                graph.prefs.updateGmailWatcherProgress(latestUid, "Verified • Latest UID #$latestUid")
+                if (header == null) {
+                    _gmailTestResult.value = "✅ Connected to Gmail! Inbox is empty."
+                } else {
+                    val threshold = settings.value.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
+                    val top = graph.embeddingMatcher.rankDialogues(
+                        rawQuery = header.combinedSearchText(),
+                        appPackageHint = "com.google.android.gm",
+                        topK = 1
+                    ).firstOrNull()
+                    if (top != null && top.score >= threshold) {
+                        val played = graph.audioPlayer.playEntry(top.entry)
+                        val audioNote = if (played) "🔊 Played clip!" else "(Attach MP3 in Vault to hear audio)"
+                        _gmailTestResult.value = "✅ Connected! Latest: \"${header.subject.take(45)}\" → Matched '${top.entry.title}' (${String.format("%.2f", top.score)}) $audioNote"
+                    } else {
+                        val topScore = top?.score ?: 0f
+                        _gmailTestResult.value = "✅ Connected! Latest: \"${header.subject.take(45)}\" (Score ${String.format("%.2f", topScore)} < ${String.format("%.2f", threshold)} — unrelated mail stayed silent)"
+                    }
+                }
+            }.onFailure { err ->
+                _gmailTestResult.value = "❌ ${err.message ?: "Connection failed"}"
             }
         }
     }
@@ -311,6 +458,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setLowRamSafeMode(enabled: Boolean) {
         viewModelScope.launch { graph.prefs.setLowRamSafeMode(enabled) }
+    }
+
+    fun setUltraLight2GbMode(enabled: Boolean) {
+        viewModelScope.launch { graph.prefs.setUltraLight2GbMode(enabled) }
     }
 
     fun setEnableGemma4E2b(enabled: Boolean) {

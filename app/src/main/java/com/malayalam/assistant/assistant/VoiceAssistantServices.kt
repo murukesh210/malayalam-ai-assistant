@@ -7,8 +7,8 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
 import android.speech.RecognitionService
+import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
@@ -29,6 +29,7 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.malayalam.assistant.AppGraph
+import com.malayalam.assistant.ai.EmbeddingMatcherEngine
 import com.malayalam.assistant.ui.overlay.GeminiFloatingOverlaySheet
 import com.malayalam.assistant.ui.theme.MalayalamAssistantTheme
 import kotlinx.coroutines.CoroutineScope
@@ -46,11 +47,6 @@ class AssistantVoiceInteractionSessionService : VoiceInteractionSessionService()
     }
 }
 
-/**
- * Companion RecognitionService required by Android's `voice-interaction-service` XML contract
- * so the app appears cleanly inside `Settings.ACTION_VOICE_INPUT_SETTINGS` as a selectable
- * Default Digital Assistant.
- */
 class AssistantRecognitionService : RecognitionService() {
     override fun onStartListening(recognizerIntent: Intent?, listener: Callback?) {
         listener?.endOfSpeech()
@@ -63,21 +59,15 @@ class AssistantRecognitionService : RecognitionService() {
 data class OverlayUiState(
     val inputText: String = "",
     val isListeningMic: Boolean = false,
+    val micRmsLevel: Float = 0f,
     val speechLocale: String = "ml-IN",
     val capturedScreenText: String = "",
     val screenAppPackage: String = "",
     val isUsingScreenContext: Boolean = false,
     val isThinking: Boolean = false,
-    val assistantResponse: String = "Hi! Hold mic for Malayalam/English, tap Read Screen, or ask for an alarm, call, or task."
+    val assistantResponse: String = "നമസ്കാരം"
 )
 
-/**
- * Floating Gemini-Style Assistant Overlay (`VoiceInteractionSession`):
- *  - Triggered system-wide via Power-button hold or corner swipe when set as Default Digital Assistant.
- *  - Supports `onHandleAssist` to read visible text from the active app behind the overlay ("Read Screen").
- *  - Supports live `SpeechRecognizer` (`ml-IN` + `en-IN`), text input, `FunctionGemma (270M)` sub-second
- *    daily task routing + Malayalam audio reaction, and instant `ModelCoordinator.unloadAll` in `onHide()`.
- */
 class AssistantVoiceInteractionSession(context: Context) :
     VoiceInteractionSession(context),
     LifecycleOwner,
@@ -119,12 +109,10 @@ class AssistantVoiceInteractionSession(context: Context) :
                 MalayalamAssistantTheme {
                     val state by uiState.collectAsState()
                     val playback by graph.audioPlayer.playbackState.collectAsState()
-                    val ram by graph.modelCoordinator.ramStatus.collectAsState()
 
                     GeminiFloatingOverlaySheet(
                         state = state,
                         playbackState = playback,
-                        ramStatus = ram,
                         onInputChange = { txt -> uiState.value = uiState.value.copy(inputText = txt) },
                         onToggleLocale = ::toggleLocale,
                         onToggleMic = ::toggleMicListening,
@@ -144,7 +132,10 @@ class AssistantVoiceInteractionSession(context: Context) :
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
         sessionScope.launch {
             val savedLocale = graph.prefs.snapshot().speechLocale
-            uiState.value = uiState.value.copy(speechLocale = savedLocale)
+            uiState.value = uiState.value.copy(
+                speechLocale = savedLocale,
+                assistantResponse = if (savedLocale.startsWith("ml")) "നമസ്കാരം" else "Namaskaram"
+            )
         }
     }
 
@@ -201,25 +192,31 @@ class AssistantVoiceInteractionSession(context: Context) :
 
     private fun activateReadScreen() {
         val screen = uiState.value.capturedScreenText
+        val ml = uiState.value.speechLocale.startsWith("ml")
         if (screen.isBlank()) {
             uiState.value = uiState.value.copy(
                 isUsingScreenContext = true,
-                assistantResponse = "Enable 'Use text from screen' in Default Assistant settings, then swipe/hold Power over any app to read its screen."
+                assistantResponse = if (ml) {
+                    "സ്ക്രീൻ വായിക്കാൻ Default Assistant സെറ്റിംഗ്സിൽ 'Use text from screen' ഓൺ ചെയ്യുക."
+                } else {
+                    "Enable 'Use text from screen' in Default Assistant settings."
+                }
             )
         } else {
             uiState.value = uiState.value.copy(
                 isUsingScreenContext = !uiState.value.isUsingScreenContext,
-                assistantResponse = "Screen captured (${screen.length} chars): \"${screen.take(140)}...\" — ask anything or react to this screen!"
+                assistantResponse = "\"${screen.take(110)}...\""
             )
-            // Also check if the screen text immediately matches a Malayalam reaction clip!
             sessionScope.launch {
                 val settings = graph.prefs.snapshot()
+                val threshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
                 val top = graph.embeddingMatcher.rankDialogues(
                     rawQuery = screen.take(400),
                     appPackageHint = uiState.value.screenAppPackage.ifBlank { null },
+                    requirePlayableAudio = true,
                     topK = 1
                 ).firstOrNull()
-                if (top != null && top.score >= settings.matchThreshold) {
+                if (top != null && top.score >= threshold) {
                     graph.audioPlayer.playEntry(top.entry)
                 }
             }
@@ -228,7 +225,10 @@ class AssistantVoiceInteractionSession(context: Context) :
 
     private fun toggleLocale() {
         val next = if (uiState.value.speechLocale == "ml-IN") "en-IN" else "ml-IN"
-        uiState.value = uiState.value.copy(speechLocale = next)
+        uiState.value = uiState.value.copy(
+            speechLocale = next,
+            assistantResponse = if (next.startsWith("ml")) "നമസ്കാരം" else "Namaskaram"
+        )
         sessionScope.launch { graph.prefs.setSpeechLocale(next) }
     }
 
@@ -239,30 +239,34 @@ class AssistantVoiceInteractionSession(context: Context) :
         }
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             uiState.value = uiState.value.copy(
-                assistantResponse = "SpeechRecognizer service unavailable on this device; type your prompt below."
+                assistantResponse = "വോയ്‌സ് സർവീസ് ലഭ്യമല്ല — താഴെയുള്ള ✦ അമർത്തി ടൈപ്പ് ചെയ്യാം."
             )
             return
         }
+        graph.audioPlayer.stop()
         stopSpeechRecognizer()
         val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
         speechRecognizer = recognizer
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
-                uiState.value = uiState.value.copy(isListeningMic = true)
+                uiState.value = uiState.value.copy(isListeningMic = true, micRmsLevel = 0.2f)
             }
             override fun onBeginningOfSpeech() = Unit
-            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onRmsChanged(rmsdB: Float) {
+                val norm = ((rmsdB + 2f) / 12f).coerceIn(0.05f, 1f)
+                uiState.value = uiState.value.copy(micRmsLevel = norm)
+            }
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEndOfSpeech() {
-                uiState.value = uiState.value.copy(isListeningMic = false)
+                uiState.value = uiState.value.copy(isListeningMic = false, micRmsLevel = 0f)
             }
             override fun onError(error: Int) {
-                uiState.value = uiState.value.copy(isListeningMic = false)
+                uiState.value = uiState.value.copy(isListeningMic = false, micRmsLevel = 0f)
             }
             override fun onResults(results: Bundle?) {
                 val heard = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull().orEmpty()
-                uiState.value = uiState.value.copy(isListeningMic = false, inputText = heard)
+                uiState.value = uiState.value.copy(isListeningMic = false, micRmsLevel = 0f, inputText = "")
                 if (heard.isNotBlank()) {
                     submitPrompt(heard)
                 }
@@ -271,7 +275,7 @@ class AssistantVoiceInteractionSession(context: Context) :
                 val part = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull().orEmpty()
                 if (part.isNotBlank()) {
-                    uiState.value = uiState.value.copy(inputText = part)
+                    uiState.value = uiState.value.copy(assistantResponse = part)
                 }
             }
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
@@ -291,42 +295,62 @@ class AssistantVoiceInteractionSession(context: Context) :
         uiState.value = uiState.value.copy(inputText = "", isThinking = true)
 
         sessionScope.launch {
-            // 1. Route daily actions via FunctionGemma (270M) first for sub-second execution
+            val settings = graph.prefs.snapshot()
+            val ml = settings.isMalayalamMode
+            val threshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
+
+            // 1. Smart Zero-RAM Malayalam + Manglish + English Command Engine
             val actionResult = graph.functionRouter.routeAndExecute(prompt)
             if (actionResult.handledAsAction) {
                 uiState.value = uiState.value.copy(
                     isThinking = false,
                     assistantResponse = actionResult.summaryText
                 )
-                val match = graph.embeddingMatcher.rankDialogues(
-                    rawQuery = "${actionResult.reactionQuery} $prompt",
-                    topK = 1
-                ).firstOrNull()
-                if (match != null && match.score >= 0.45f) {
-                    graph.audioPlayer.playEntry(match.entry)
+                var played = false
+                if (!actionResult.awaitingFollowUp && actionResult.reactionQuery.isNotBlank()) {
+                    val match = graph.embeddingMatcher.rankDialogues(
+                        rawQuery = "${actionResult.reactionQuery} $prompt",
+                        requirePlayableAudio = true,
+                        topK = 1
+                    ).firstOrNull()
+                    if (match != null && match.score >= threshold) {
+                        played = graph.audioPlayer.playEntry(match.entry)
+                    }
+                }
+                if (!played && settings.ttsVoiceRepliesEnabled) {
+                    graph.audioPlayer.speakShortReplyIfIdle(actionResult.summaryText, preferMalayalam = ml)
                 }
                 return@launch
             }
 
-            // 2. Check for matching Malayalam dialogue reaction first, then light Gemma 3 1B reply
-            val settings = graph.prefs.snapshot()
-            val screenCtx = uiState.value.capturedScreenText.takeIf { uiState.value.isUsingScreenContext && it.isNotBlank() }
+            // 2. Situation Dialogue Match + Natural Reply
+            val screenCtx = uiState.value.capturedScreenText
+                .takeIf { uiState.value.isUsingScreenContext && it.isNotBlank() }
             val topDialogue = graph.embeddingMatcher.rankDialogues(
                 rawQuery = prompt,
+                requirePlayableAudio = true,
                 topK = 1
             ).firstOrNull()
-            if (topDialogue != null && topDialogue.score >= settings.matchThreshold) {
-                graph.audioPlayer.playEntry(topDialogue.entry)
+
+            var playedTitle: String? = null
+            if (topDialogue != null && topDialogue.score >= threshold) {
+                if (graph.audioPlayer.playEntry(topDialogue.entry)) {
+                    playedTitle = topDialogue.entry.title
+                }
             }
 
             val reply = graph.gemmaSituationEngine.generateAssistantReply(
                 userMessage = prompt,
-                screenContext = screenCtx
+                screenContext = screenCtx,
+                matchedDialogueTitle = playedTitle
             )
             uiState.value = uiState.value.copy(
                 isThinking = false,
                 assistantResponse = reply
             )
+            if (playedTitle == null && settings.ttsVoiceRepliesEnabled) {
+                graph.audioPlayer.speakShortReplyIfIdle(reply, preferMalayalam = ml)
+            }
         }
     }
 
@@ -336,12 +360,11 @@ class AssistantVoiceInteractionSession(context: Context) :
             speechRecognizer?.destroy()
         }
         speechRecognizer = null
-        uiState.value = uiState.value.copy(isListeningMic = false)
+        uiState.value = uiState.value.copy(isListeningMic = false, micRmsLevel = 0f)
     }
 
     override fun onHide() {
         stopSpeechRecognizer()
-        // CRITICAL 4 GB RAM rule: immediately unload active AI model when floating overlay closes
         graph.modelCoordinator.unloadAllAsync("overlay_onHide")
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         super.onHide()

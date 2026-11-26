@@ -12,12 +12,13 @@ import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.malayalam.assistant.AppGraph
+import com.malayalam.assistant.ai.EmbeddingMatcherEngine
+import com.malayalam.assistant.audio.TriggerDeduplicator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicLong
 
 object AudioOutputGuard {
 
@@ -78,25 +79,21 @@ object AudioOutputGuard {
 }
 
 /**
- * Background `NotificationListenerService`:
+ * Background `NotificationListenerService` (for standard 4 GB+ Android phones):
  *  - Watches selected apps (Gmail, WhatsApp, Messages, etc.)
  *  - Skips ongoing notifications, group summaries, and OTPs
- *  - Enforces a strict 15-second cooldown
- *  - Respects DND, Silent/Vibrate mode, and the "Headphones / Bluetooth Only" toggle
- *  - Matches incoming notification text via `EmbeddingGemma 2 Text (270M)` (default threshold `0.65`)
- *    and plays the winning Malayalam dialogue clip via `MediaPlayer`.
+ *  - Deduplicates by `notificationKey + textHash` with a strict 60-second cooldown
+ *    so the same notification NEVER loops or plays twice!
  */
 class DialogueNotificationListenerService : NotificationListenerService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val lastReactionEpochMs = AtomicLong(0L)
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val notification = sbn?.notification ?: return
         val pkg = sbn.packageName ?: return
         if (pkg == packageName) return
 
-        // Skip ongoing or group summary notifications
         val flags = notification.flags
         if ((flags and Notification.FLAG_ONGOING_EVENT) != 0) return
         if ((flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
@@ -109,14 +106,13 @@ class DialogueNotificationListenerService : NotificationListenerService() {
         if (combined.length < 3) return
         if (AudioOutputGuard.isLikelyOtp(combined)) return
 
-        // Enforce 15-second cooldown before waking up any matcher
-        val now = System.currentTimeMillis()
-        val prev = lastReactionEpochMs.get()
-        if (now - prev < COOLDOWN_MS) return
+        val notifKey = sbn.key ?: pkg
 
         serviceScope.launch {
             val graph = AppGraph.from(applicationContext)
             val settings = graph.prefs.snapshot()
+            // Avoid double-playing Gmail if Gmail Direct Watcher is already handling Gmail
+            if (pkg == "com.google.android.gm" && settings.gmailWatcherEnabled) return@launch
             if (pkg !in settings.watchedPackages) return@launch
             if (!AudioOutputGuard.canPlayReactionNow(applicationContext, settings.headphonesOrBluetoothOnly)) {
                 return@launch
@@ -125,11 +121,18 @@ class DialogueNotificationListenerService : NotificationListenerService() {
             val topMatch = graph.embeddingMatcher.rankDialogues(
                 rawQuery = combined,
                 appPackageHint = pkg,
+                requirePlayableAudio = true,
                 topK = 1
             ).firstOrNull() ?: return@launch
 
-            if (topMatch.score >= settings.matchThreshold) {
-                lastReactionEpochMs.set(System.currentTimeMillis())
+            val threshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
+            if (topMatch.score >= threshold &&
+                TriggerDeduplicator.shouldAllowAutoTrigger(
+                    sourceKey = notifKey,
+                    messageBody = combined,
+                    dialogueId = topMatch.entry.id
+                )
+            ) {
                 graph.audioPlayer.playEntry(topMatch.entry)
             }
         }
@@ -138,10 +141,6 @@ class DialogueNotificationListenerService : NotificationListenerService() {
     override fun onDestroy() {
         serviceScope.cancel()
         super.onDestroy()
-    }
-
-    companion object {
-        const val COOLDOWN_MS = 15_000L
     }
 }
 
@@ -162,9 +161,18 @@ class BatteryLowReceiver : BroadcastReceiver() {
                 }
                 val match = graph.embeddingMatcher.rankDialogues(
                     rawQuery = "battery low 15% connect charger phone dying low_battery",
+                    requirePlayableAudio = true,
                     topK = 1
-                ).firstOrNull()
-                if (match != null && match.score >= (settings.matchThreshold - 0.08f).coerceAtLeast(0.45f)) {
+                ).firstOrNull() ?: return@launch
+
+                val threshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
+                if (match.score >= threshold &&
+                    TriggerDeduplicator.shouldAllowAutoTrigger(
+                        sourceKey = "system_battery_low",
+                        messageBody = "battery_low_broadcast",
+                        dialogueId = match.entry.id
+                    )
+                ) {
                     graph.audioPlayer.playEntry(match.entry)
                 }
             } finally {

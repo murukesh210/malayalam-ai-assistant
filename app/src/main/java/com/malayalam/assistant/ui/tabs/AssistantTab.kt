@@ -1,6 +1,8 @@
 package com.malayalam.assistant.ui.tabs
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -11,8 +13,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,22 +25,24 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,14 +53,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.malayalam.assistant.ai.RamStatus
 import com.malayalam.assistant.audio.PlaybackState
 import com.malayalam.assistant.data.TodoEntity
 import com.malayalam.assistant.ui.ChatTurn
-import com.malayalam.assistant.ui.overlay.AudioPlaybackBar
-import com.malayalam.assistant.ui.theme.GeminiAmber
+import com.malayalam.assistant.ui.components.FourPointSparkleButton
+import com.malayalam.assistant.ui.components.GlowingWaveformOrb
+import com.malayalam.assistant.ui.components.SoftGlowIconButton
 import com.malayalam.assistant.ui.theme.GeminiBlue
 import com.malayalam.assistant.ui.theme.GeminiCard
 import com.malayalam.assistant.ui.theme.GeminiCoral
@@ -63,302 +72,410 @@ import com.malayalam.assistant.ui.theme.GeminiSurface
 import com.malayalam.assistant.ui.theme.GeminiTextPrimary
 import com.malayalam.assistant.ui.theme.GeminiTextSecondary
 import com.malayalam.assistant.ui.theme.GeminiViolet
+import com.malayalam.assistant.ui.theme.WavePurple
+import com.malayalam.assistant.ui.theme.matteCharcoalGradient
 
+/**
+ * Minimalist Dark Voice-First Home Interface:
+ *  - Full-screen matte dark charcoal gradient (`#18191D` -> `#212228`).
+ *  - Top-left `☰` Hamburger Menu & Top-right `⚙️` Settings Gear with subtle radial glow.
+ *  - Center Hero: `നമസ്കാരം` greeting (transitions smoothly to `കേൾക്കുന്നു...`, live reply, or playing clip + Stop pill)
+ *    above the `172.dp` Glowing Cyan-to-Violet Waveform Orb.
+ *  - Bottom-right subtle `✦` four-point sparkle toggling a slide-up Text Input & Quick Actions sheet.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AssistantTab(
-    ramStatus: RamStatus,
+fun MinimalVoiceHomeScreen(
+    heroText: String,
     playbackState: PlaybackState,
     chatHistory: List<ChatTurn>,
-    todos: List<TodoEntity>,
-    isBusy: Boolean,
     speechLocale: String,
     isMicListening: Boolean,
-    onSendPrompt: (String) -> Unit,
-    onStartVoiceInput: ((String) -> Unit) -> Unit,
-    onToggleLocale: () -> Unit,
-    onUnloadRam: () -> Unit,
+    micRmsLevel: Float,
+    onOrbClick: () -> Unit,
     onStopAudio: () -> Unit,
-    onToggleTodo: (Long, Boolean) -> Unit,
-    onDeleteTodo: (Long) -> Unit
+    onOpenDrawer: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onSendTypedPrompt: (String) -> Unit,
+    onToggleLocale: () -> Unit
 ) {
-    var inputText by rememberSaveable { mutableStateOf("") }
-    var showTodos by rememberSaveable { mutableStateOf(false) }
+    var showSparkleInputSheet by rememberSaveable { mutableStateOf(false) }
 
-    Column(
+    val displayHeadline = when {
+        isMicListening -> if (speechLocale.startsWith("ml")) "കേൾക്കുന്നു..." else "Listening..."
+        playbackState.isPlaying -> playbackState.activeTitle.ifBlank { "Playing Dialogue..." }
+        else -> heroText
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .background(matteCharcoalGradient())
+            .statusBarsPadding()
+            .navigationBarsPadding()
     ) {
-        // Top Header + Live RAM Usage Badge
+        // 1. Minimal Top Bar (☰ Left, ⚙️ Right)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
-                .background(GeminiSurface)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .align(Alignment.TopCenter)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Default.AutoAwesome,
-                contentDescription = null,
-                tint = GeminiViolet,
-                modifier = Modifier.size(22.dp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Malayalam Assistant",
-                    color = GeminiTextPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp
+            SoftGlowIconButton(onClick = onOpenDrawer) {
+                Icon(
+                    imageVector = Icons.Default.Menu,
+                    contentDescription = "Menu",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Memory,
-                        contentDescription = null,
-                        tint = if (ramStatus.isSystemLowMemory) GeminiCoral else GeminiMint,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = "${ramStatus.activeModelLabel} • ${ramStatus.freeRamMb}/${ramStatus.totalRamMb} MB free",
-                        color = if (ramStatus.activeModel != null) GeminiAmber else GeminiMint,
-                        fontSize = 11.sp
-                    )
-                }
             }
-            if (ramStatus.activeModel != null) {
-                TextButton(onClick = onUnloadRam) {
-                    Text("Free RAM", color = GeminiBlue, fontSize = 12.sp)
-                }
+
+            SoftGlowIconButton(onClick = onOpenSettings) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "Settings",
+                    tint = Color.White,
+                    modifier = Modifier.size(23.dp)
+                )
             }
         }
 
-        // Instant Playback Bar when a Malayalam clip triggers
-        if (playbackState.isPlaying) {
-            Spacer(Modifier.height(8.dp))
-            AudioPlaybackBar(playbackState = playbackState, onStop = onStopAudio)
-        }
-
-        // Quick Action & To-Do Chips
-        Spacer(Modifier.height(8.dp))
-        Row(
+        // 2. Center Hero Area: Greeting / Live Status + Glowing Waveform Orb
+        Column(
             modifier = Modifier
+                .align(Alignment.Center)
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            AssistChip(
-                onClick = { showTodos = !showTodos },
-                label = { Text("To-Dos (${todos.count { !it.isCompleted }})", fontSize = 12.sp) },
-                colors = AssistChipDefaults.assistChipColors(
-                    containerColor = if (showTodos) GeminiBlue.copy(alpha = 0.22f) else GeminiCard,
-                    labelColor = GeminiTextPrimary
-                )
-            )
-            listOf(
-                "Set alarm for 6:30 AM",
-                "Add todo Buy milk",
-                "Open WhatsApp",
-                "You failed in your exam"
-            ).forEach { suggestion ->
-                AssistChip(
-                    onClick = { onSendPrompt(suggestion) },
-                    label = { Text(suggestion, fontSize = 12.sp) },
-                    colors = AssistChipDefaults.assistChipColors(
-                        containerColor = GeminiCard,
-                        labelColor = GeminiTextSecondary
-                    )
+            Crossfade(targetState = displayHeadline, label = "hero_headline") { headline ->
+                val isShortGreeting = headline.length <= 18
+                Text(
+                    text = headline,
+                    color = Color.White,
+                    fontSize = if (isShortGreeting) 30.sp else 20.sp,
+                    lineHeight = if (isShortGreeting) 38.sp else 28.sp,
+                    fontWeight = if (isShortGreeting) FontWeight.Medium else FontWeight.Normal,
+                    textAlign = TextAlign.Center,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
+
+            // Compact Stop pill when a Malayalam dialogue clip is actively playing
+            if (playbackState.isPlaying) {
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(GeminiCard)
+                        .border(1.dp, WavePurple.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                        .clickable(onClick = onStopAudio)
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Stop,
+                        contentDescription = "Stop",
+                        tint = GeminiCoral,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (speechLocale.startsWith("ml")) "നിർത്തുക (Stop)" else "Stop Audio",
+                        color = GeminiTextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            } else {
+                Spacer(Modifier.height(22.dp))
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            GlowingWaveformOrb(
+                isListening = isMicListening,
+                isPlaying = playbackState.isPlaying,
+                micLevel = micRmsLevel,
+                onClick = onOrbClick
+            )
         }
 
-        // Collapsible Room To-Do List Panel
-        if (showTodos && todos.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
+        // 3. Clutter-Free Bottom Area: Subtle Four-Point Sparkle (`✦`) in Bottom-Right
+        FourPointSparkleButton(
+            onClick = { showSparkleInputSheet = true },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 18.dp, bottom = 16.dp)
+        )
+    }
+
+    // Slide-Up Minimalist Text Input & Quick Actions Sheet (toggled by `✦`)
+    if (showSparkleInputSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        var typedText by rememberSaveable { mutableStateOf("") }
+
+        ModalBottomSheet(
+            onDismissRequest = { showSparkleInputSheet = false },
+            sheetState = sheetState,
+            containerColor = GeminiSurface
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(GeminiSurface)
-                    .padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                    .imePadding()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 18.dp, vertical = 8.dp)
             ) {
-                todos.take(5).forEach { todo ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = if (todo.isCompleted) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                            contentDescription = null,
-                            tint = if (todo.isCompleted) GeminiMint else GeminiBlue,
-                            modifier = Modifier
-                                .size(18.dp)
-                                .clickable { onToggleTodo(todo.id, !todo.isCompleted) }
+                // Language pill + Quick Action suggestions
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AssistChip(
+                        onClick = onToggleLocale,
+                        label = {
+                            Text(
+                                text = if (speechLocale.startsWith("ml")) "ഭാഷ: മലയാളം (ML)" else "Lang: English (EN)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = GeminiBlue.copy(alpha = 0.18f),
+                            labelColor = GeminiBlue
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = todo.task,
-                            color = if (todo.isCompleted) GeminiTextSecondary else GeminiTextPrimary,
-                            fontSize = 13.sp,
-                            modifier = Modifier.weight(1f)
+                    )
+                    listOf(
+                        "സെറ്റ് അലാം",
+                        "രാവിലെ 6:30 അലാം",
+                        "വാട്സ്ആപ്പ് തുറക്ക്",
+                        "ചാർജ് എത്ര",
+                        "You failed in your exam"
+                    ).forEach { chip ->
+                        AssistChip(
+                            onClick = {
+                                onSendTypedPrompt(chip)
+                                showSparkleInputSheet = false
+                            },
+                            label = { Text(chip, fontSize = 12.sp) },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = GeminiCard,
+                                labelColor = GeminiTextSecondary
+                            )
                         )
-                        IconButton(onClick = { onDeleteTodo(todo.id) }, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = GeminiTextSecondary)
+                    }
+                }
+
+                // Show last 3 messages subtly if any exist
+                val recent = chatHistory.takeLast(3)
+                if (recent.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        recent.forEach { turn ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = if (turn.isUser) Arrangement.End else Arrangement.Start
+                            ) {
+                                Text(
+                                    text = turn.text,
+                                    color = if (turn.isUser) GeminiBlue else GeminiTextPrimary,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(if (turn.isUser) GeminiBlue.copy(alpha = 0.14f) else GeminiCard)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                )
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        // Chat Stream
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(chatHistory, key = { it.id }) { turn ->
-                ChatBubble(turn)
-            }
-        }
-
-        if (isBusy) {
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp),
-                color = GeminiBlue,
-                trackColor = GeminiCard
-            )
-        }
-
-        // Bottom Gemini-style Composer
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = if (speechLocale == "ml-IN") "ML" else "EN",
-                color = GeminiViolet,
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(GeminiCard)
-                    .clickable(onClick = onToggleLocale)
-                    .padding(horizontal = 9.dp, vertical = 12.dp)
-            )
-            Spacer(Modifier.width(6.dp))
-            OutlinedTextField(
-                value = inputText,
-                onValueChange = { inputText = it },
-                modifier = Modifier.weight(1f),
-                placeholder = {
-                    Text(
-                        text = if (isMicListening) "Listening ($speechLocale)..." else "Ask Gemini-style offline AI...",
-                        color = GeminiTextSecondary,
-                        fontSize = 13.sp
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = typedText,
+                        onValueChange = { typedText = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = {
+                            Text(
+                                text = if (speechLocale.startsWith("ml")) {
+                                    "ടൈപ്പ് ചെയ്യുക (ഉദാ: സെറ്റ് അലാം, വാട്സ്ആപ്പ് തുറക്ക്)..."
+                                } else {
+                                    "Type a command (e.g. set an alarm, open WhatsApp)..."
+                                },
+                                color = GeminiTextSecondary,
+                                fontSize = 13.sp
+                            )
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(24.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = GeminiPill,
+                            unfocusedContainerColor = GeminiPill,
+                            focusedBorderColor = GeminiBlue,
+                            unfocusedBorderColor = Color.Transparent,
+                            focusedTextColor = GeminiTextPrimary,
+                            unfocusedTextColor = GeminiTextPrimary
+                        )
                     )
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(24.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = GeminiPill,
-                    unfocusedContainerColor = GeminiPill,
-                    focusedBorderColor = GeminiBlue,
-                    unfocusedBorderColor = Color.Transparent,
-                    focusedTextColor = GeminiTextPrimary,
-                    unfocusedTextColor = GeminiTextPrimary
-                )
-            )
-            Spacer(Modifier.width(6.dp))
-            IconButton(
-                onClick = {
-                    onStartVoiceInput { recognized ->
-                        inputText = recognized
-                        if (recognized.isNotBlank()) {
-                            onSendPrompt(recognized)
-                            inputText = ""
-                        }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        onClick = {
+                            if (typedText.isNotBlank()) {
+                                val send = typedText
+                                typedText = ""
+                                onSendTypedPrompt(send)
+                                showSparkleInputSheet = false
+                            }
+                        },
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(GeminiBlue)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Send",
+                            tint = Color(0xFF071324)
+                        )
                     }
-                },
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(if (isMicListening) GeminiCoral else GeminiCard)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Mic,
-                    contentDescription = "Mic",
-                    tint = if (isMicListening) Color.Black else GeminiBlue
-                )
-            }
-            Spacer(Modifier.width(6.dp))
-            IconButton(
-                onClick = {
-                    if (inputText.isNotBlank()) {
-                        onSendPrompt(inputText)
-                        inputText = ""
-                    }
-                },
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(GeminiBlue)
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "Send",
-                    tint = Color(0xFF081426)
-                )
+                }
+                Spacer(Modifier.height(12.dp))
             }
         }
     }
 }
 
+/**
+ * Secondary Drawer Destination: Recent Activity / Chat Log + Offline To-Do List.
+ */
 @Composable
-private fun ChatBubble(turn: ChatTurn) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (turn.isUser) Arrangement.End else Arrangement.Start
+fun RecentActivityScreen(
+    chatHistory: List<ChatTurn>,
+    todos: List<TodoEntity>,
+    onBack: () -> Unit,
+    onToggleTodo: (Long, Boolean) -> Unit,
+    onDeleteTodo: (Long) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(matteCharcoalGradient())
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(if (turn.isUser) 0.82f else 0.94f)
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 18.dp,
-                        topEnd = 18.dp,
-                        bottomStart = if (turn.isUser) 18.dp else 4.dp,
-                        bottomEnd = if (turn.isUser) 4.dp else 18.dp
-                    )
-                )
-                .background(if (turn.isUser) GeminiBlue.copy(alpha = 0.22f) else GeminiSurface)
-                .padding(12.dp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+            }
+            Text(
+                text = "Recent Activity & To-Dos",
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 18.sp
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Column {
-                if (!turn.isUser && turn.badge.isNotBlank()) {
+            if (todos.isNotEmpty()) {
+                item {
                     Text(
-                        text = turn.badge,
+                        text = "Saved Reminders / To-Dos",
                         color = GeminiViolet,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp
                     )
-                    Spacer(Modifier.height(3.dp))
                 }
+                items(todos, key = { "todo_${it.id}" }) { todo ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(GeminiSurface)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (todo.isCompleted) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                            contentDescription = null,
+                            tint = if (todo.isCompleted) GeminiMint else GeminiBlue,
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clickable { onToggleTodo(todo.id, !todo.isCompleted) }
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = todo.task,
+                            color = if (todo.isCompleted) GeminiTextSecondary else GeminiTextPrimary,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { onDeleteTodo(todo.id) }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = GeminiTextSecondary)
+                        }
+                    }
+                }
+            }
+
+            item {
                 Text(
-                    text = turn.text,
-                    color = GeminiTextPrimary,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
+                    text = "Voice & Command Log",
+                    color = GeminiBlue,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp
                 )
-                if (turn.triggeredClipTitle != null) {
-                    Spacer(Modifier.height(6.dp))
+            }
+
+            if (chatHistory.isEmpty()) {
+                item {
                     Text(
-                        text = "🔊 Played Malayalam Reaction: ${turn.triggeredClipTitle}",
-                        color = GeminiMint,
-                        fontSize = 11.sp
+                        text = "No commands spoken yet. Tap the glowing orb on Home to speak!",
+                        color = GeminiTextSecondary,
+                        fontSize = 13.sp
                     )
+                }
+            } else {
+                items(chatHistory.reversed(), key = { it.id }) { turn ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (turn.isUser) GeminiBlue.copy(alpha = 0.14f) else GeminiSurface)
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            text = if (turn.isUser) "You" else turn.badge.ifBlank { "Assistant" },
+                            color = if (turn.isUser) GeminiBlue else GeminiViolet,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(text = turn.text, color = GeminiTextPrimary, fontSize = 14.sp)
+                        if (turn.triggeredClipTitle != null) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "🔊 ${turn.triggeredClipTitle}",
+                                color = GeminiMint,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
                 }
             }
         }

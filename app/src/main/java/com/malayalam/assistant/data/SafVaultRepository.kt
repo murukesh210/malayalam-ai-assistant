@@ -18,11 +18,11 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Manages the user's dedicated SAF folder (e.g., Documents/MalayalamAssistant/):
- *  - Persistable URI permission across APK reinstalls
- *  - Automatic `.nomedia` creation so music players ignore clips
- *  - Syncs `dialogues.json` + `embeddings_cache.json` directly inside the SAF folder
- *    (with fallback mirror in internal filesDir before SAF folder is selected)
+ * Manages the user's Malayalam Dialogue Vault:
+ *  - Supports immediate 1-tap MP3/WAV/OGG linking per dialogue card EVEN BEFORE setting up a full SAF folder
+ *    (storing clips safely in app-external `vault_clips/` with `.nomedia`).
+ *  - Also supports dedicated persistent SAF folder (`Documents/MalayalamAssistant/`) so clips & `dialogues.json`
+ *    survive APK reinstalls.
  */
 class SafVaultRepository(
     private val context: Context,
@@ -54,7 +54,33 @@ class SafVaultRepository(
             } else {
                 loadFromInternalFallback()
             }
+
+            // Seed helpful starter templates on first launch so user can 1-tap attach MP3s right away
+            if (_dialogues.value.isEmpty() && !fallbackVaultFile.exists()) {
+                _dialogues.value = defaultStarterTemplates()
+                persistUnlocked()
+            }
         }
+    }
+
+    /**
+     * Checks whether `entry` has an attached, readable audio file (either SAF `content://` or local `file://`).
+     */
+    fun hasPlayableAudio(entry: DialogueEntry): Boolean {
+        val raw = entry.safUriString.trim()
+        if (raw.isBlank()) return false
+        return runCatching {
+            val uri = Uri.parse(raw)
+            when (uri.scheme) {
+                "file" -> File(uri.path ?: return false).let { it.exists() && it.length() > 128L }
+                "content" -> {
+                    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                        afd.length != 0L
+                    } ?: false
+                }
+                else -> false
+            }
+        }.getOrDefault(false)
     }
 
     suspend fun bindSafFolder(treeUri: Uri): Int = withContext(Dispatchers.IO) {
@@ -73,8 +99,36 @@ class SafVaultRepository(
     }
 
     /**
+     * 1-tap links an `.mp3` / `.wav` / `.ogg` file directly to an existing `DialogueEntry`
+     * (works with or without a SAF folder configured).
+     */
+    suspend fun attachAudioToDialogue(dialogueId: String, sourceUri: Uri): DialogueEntry? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    sourceUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            val copied = copyExternalClipIntoVault(sourceUri) ?: return@withContext null
+            mutex.withLock {
+                val list = _dialogues.value.toMutableList()
+                val idx = list.indexOfFirst { it.id == dialogueId }
+                if (idx < 0) return@withLock null
+                val updated = list[idx].copy(
+                    fileName = copied.first,
+                    safUriString = copied.second
+                )
+                list[idx] = updated
+                _dialogues.value = list
+                persistUnlocked()
+                updated
+            }
+        }
+
+    /**
      * Copies an externally picked `.mp3`/`.wav`/`.ogg`/`.m4a` file into the SAF folder
-     * (or internal clips dir if SAF isn't configured yet) and returns `(fileName, uriString)`.
+     * (or internal `vault_clips/` dir if SAF isn't configured yet) and returns `(fileName, uriString)`.
      */
     suspend fun copyExternalClipIntoVault(sourceUri: Uri): Pair<String, String>? = withContext(Dispatchers.IO) {
         val rawName = queryDisplayName(sourceUri) ?: "clip_${System.currentTimeMillis()}.mp3"
@@ -91,25 +145,21 @@ class SafVaultRepository(
                 context.contentResolver.openOutputStream(targetDoc.uri, "wt")?.use { output ->
                     input.copyTo(output, bufferSize = 16 * 1024)
                 }
-            }
+            } ?: return@withContext null
             return@withContext safeName to targetDoc.uri.toString()
         } else {
-            val clipsDir = File(context.getExternalFilesDir(null), "vault_clips").apply { mkdirs() }
+            val clipsDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "vault_clips").apply { mkdirs() }
             File(clipsDir, ".nomedia").apply { if (!exists()) createNewFile() }
             val dest = File(clipsDir, safeName)
             context.contentResolver.openInputStream(sourceUri)?.use { input ->
                 dest.outputStream().use { output ->
                     input.copyTo(output, bufferSize = 16 * 1024)
                 }
-            }
+            } ?: return@withContext null
             return@withContext safeName to Uri.fromFile(dest).toString()
         }
     }
 
-    /**
-     * Scans the SAF folder for `.mp3`, `.wav`, `.ogg`, `.m4a` files not yet indexed in `dialogues.json`
-     * or awaiting review.
-     */
     suspend fun findUnorganizedAudioFiles(pendingFileNames: Set<String>): List<Pair<String, String>> =
         withContext(Dispatchers.IO) {
             val treeDoc = resolveTreeDoc(prefs.snapshot().safTreeUri) ?: return@withContext emptyList()
@@ -133,7 +183,10 @@ class SafVaultRepository(
     ) = withContext(Dispatchers.IO) {
         mutex.withLock {
             val updatedList = _dialogues.value.toMutableList()
-            val idx = updatedList.indexOfFirst { it.id == entry.id || it.fileName.equals(entry.fileName, ignoreCase = true) }
+            val idx = updatedList.indexOfFirst {
+                it.id == entry.id ||
+                    (entry.fileName.isNotBlank() && it.fileName.equals(entry.fileName, ignoreCase = true))
+            }
             val finalEntry = if (idx >= 0) {
                 val existingId = updatedList[idx].id
                 entry.copy(id = existingId)
@@ -168,7 +221,7 @@ class SafVaultRepository(
             _vectors.value = updatedVectors
             persistUnlocked()
 
-            if (deleteUnderlyingFile && target != null) {
+            if (deleteUnderlyingFile && target != null && target.safUriString.isNotBlank()) {
                 runCatching {
                     val uri = Uri.parse(target.safUriString)
                     DocumentFile.fromSingleUri(context, uri)?.delete()
@@ -176,6 +229,59 @@ class SafVaultRepository(
             }
         }
     }
+
+    private fun defaultStarterTemplates(): List<DialogueEntry> = listOf(
+        DialogueEntry(
+            id = "starter_exam_fail",
+            fileName = "",
+            safUriString = "",
+            title = "Exam Fail / Arrear Reaction (e.g. Yodha)",
+            heardText = "പരീക്ഷ തോറ്റു / സപ്ലി കിട്ടി",
+            category = SituationCategory.EXAM_FAIL.id,
+            situations = listOf(
+                "You failed in your exam",
+                "exam fail",
+                "arrear",
+                "supply",
+                "low marks result",
+                "potti",
+                "പരീക്ഷ തോറ്റു"
+            ),
+            recommendedApps = listOf("com.google.android.gm", "com.whatsapp")
+        ),
+        DialogueEntry(
+            id = "starter_money_salary",
+            fileName = "",
+            safUriString = "",
+            title = "Salary / Bank Money Credited",
+            heardText = "പൈസ വന്നു / അക്കൗണ്ടിൽ കാശ് കയറി",
+            category = SituationCategory.MONEY.id,
+            situations = listOf(
+                "salary credited",
+                "bank account credited",
+                "upi payment received",
+                "paisa vannu",
+                "ശമ്പളം കിട്ടി"
+            ),
+            recommendedApps = listOf("com.google.android.gm", "com.google.android.apps.messaging")
+        ),
+        DialogueEntry(
+            id = "starter_low_battery",
+            fileName = "",
+            safUriString = "",
+            title = "Low Battery Warning Clip",
+            heardText = "ചാർജ് തീരാറായി വേഗം ചാർജിലിട്",
+            category = SituationCategory.LOW_BATTERY.id,
+            situations = listOf(
+                "battery low 15%",
+                "connect charger",
+                "phone dying",
+                "charge theernnu",
+                "ബാറ്ററി കുറവാണ്"
+            ),
+            recommendedApps = emptyList()
+        )
+    )
 
     private fun ensureNoMedia(treeDoc: DocumentFile) {
         if (treeDoc.findFile(".nomedia") == null) {
@@ -225,11 +331,15 @@ class SafVaultRepository(
             .filter { it.isFile && it.name != null }
             .associateBy { it.name!!.lowercase() }
         return entries.map { entry ->
-            val matchedDoc = filesByName[entry.fileName.lowercase()]
-            if (matchedDoc != null) {
-                entry.copy(safUriString = matchedDoc.uri.toString())
-            } else {
+            if (entry.fileName.isBlank()) {
                 entry
+            } else {
+                val matchedDoc = filesByName[entry.fileName.lowercase()]
+                if (matchedDoc != null) {
+                    entry.copy(safUriString = matchedDoc.uri.toString())
+                } else {
+                    entry
+                }
             }
         }
     }
@@ -264,11 +374,9 @@ class SafVaultRepository(
             )
         )
 
-        // Always keep lightweight internal backup mirror
         runCatching { fallbackVaultFile.writeText(vaultPayload) }
         runCatching { fallbackVectorFile.writeText(vectorPayload) }
 
-        // Sync directly into user's SAF folder so data survives APK reinstalls
         val treeDoc = resolveTreeDoc(prefs.snapshot().safTreeUri)
         if (treeDoc != null && treeDoc.canWrite()) {
             ensureNoMedia(treeDoc)

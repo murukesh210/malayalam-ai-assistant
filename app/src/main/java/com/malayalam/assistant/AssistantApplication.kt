@@ -12,6 +12,7 @@ import com.malayalam.assistant.audio.MalayalamAudioListener
 import com.malayalam.assistant.data.AppDatabase
 import com.malayalam.assistant.data.AppPreferences
 import com.malayalam.assistant.data.SafVaultRepository
+import com.malayalam.assistant.service.GmailDirectWatcherService
 import com.malayalam.assistant.worker.PipelineStatusTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +40,8 @@ class AppGraph(context: Context) {
         context = appContext,
         coordinator = modelCoordinator,
         downloader = modelDownloadManager,
-        todoDao = db.todoDao()
+        todoDao = db.todoDao(),
+        prefs = prefs
     )
 
     val gemmaSituationEngine = GemmaSituationEngine(
@@ -77,6 +79,10 @@ class AssistantApplication : Application() {
         graph = AppGraph(this)
         appScope.launch {
             graph.vaultRepository.initializeFromDisk()
+            val settings = graph.prefs.snapshot()
+            if (settings.gmailWatcherEnabled && settings.gmailAddress.isNotBlank()) {
+                GmailDirectWatcherService.syncServiceState(this@AssistantApplication, true)
+            }
         }
     }
 

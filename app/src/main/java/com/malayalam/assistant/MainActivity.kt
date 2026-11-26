@@ -2,6 +2,7 @@ package com.malayalam.assistant
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -10,44 +11,72 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Science
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.malayalam.assistant.ai.ManagedModelId
 import com.malayalam.assistant.service.AudioOutputGuard
 import com.malayalam.assistant.ui.MainViewModel
-import com.malayalam.assistant.ui.tabs.AssistantTab
 import com.malayalam.assistant.ui.tabs.DialogueVaultTab
+import com.malayalam.assistant.ui.tabs.MinimalVoiceHomeScreen
 import com.malayalam.assistant.ui.tabs.ModelsAndSettingsTab
-import com.malayalam.assistant.ui.theme.GeminiBg
+import com.malayalam.assistant.ui.tabs.RecentActivityScreen
+import com.malayalam.assistant.ui.theme.GeminiBlue
+import com.malayalam.assistant.ui.theme.GeminiCard
 import com.malayalam.assistant.ui.theme.GeminiSurface
+import com.malayalam.assistant.ui.theme.GeminiTextPrimary
+import com.malayalam.assistant.ui.theme.GeminiTextSecondary
 import com.malayalam.assistant.ui.theme.MalayalamAssistantTheme
+import kotlinx.coroutines.launch
+
+private enum class AppDestination {
+    HOME_ORB,
+    DIALOGUE_VAULT,
+    TEST_SIMULATOR,
+    RECENT_ACTIVITY,
+    MODELS_SETTINGS
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -60,9 +89,15 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MalayalamAssistantTheme {
-                var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+                var destination by rememberSaveable { mutableStateOf(AppDestination.HOME_ORB) }
+                val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+                val uiScope = rememberCoroutineScope()
+
                 var pendingModelImportTarget by remember { mutableStateOf<ManagedModelId?>(null) }
+                var pendingAttachDialogueId by remember { mutableStateOf<String?>(null) }
+
                 var isMicListening by remember { mutableStateOf(false) }
+                var micRmsLevel by remember { mutableFloatStateOf(0f) }
                 var notifEnabled by remember {
                     mutableStateOf(AudioOutputGuard.isNotificationAccessGranted(this))
                 }
@@ -78,33 +113,80 @@ class MainActivity : ComponentActivity() {
                     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
+                // Back gesture returns cleanly from any drawer/settings screen to the pure Home Orb
+                BackHandler(enabled = destination != AppDestination.HOME_ORB || drawerState.isOpen) {
+                    if (drawerState.isOpen) {
+                        uiScope.launch { drawerState.close() }
+                    } else {
+                        destination = AppDestination.HOME_ORB
+                    }
+                }
+
+                val heroText by viewModel.heroGreetingOrReply.collectAsState()
                 val ramStatus by viewModel.ramStatus.collectAsState()
                 val playbackState by viewModel.playbackState.collectAsState()
                 val chatHistory by viewModel.chatHistory.collectAsState()
                 val todos by viewModel.todos.collectAsState()
-                val isChatBusy by viewModel.isChatBusy.collectAsState()
                 val settings by viewModel.settings.collectAsState()
                 val dialogues by viewModel.dialogues.collectAsState()
+                val playableAudioMap by viewModel.playableAudioMap.collectAsState()
                 val pendingReviews by viewModel.pendingReviews.collectAsState()
                 val pipelineProgress by viewModel.pipelineProgress.collectAsState()
                 val simulatorResults by viewModel.simulatorResults.collectAsState()
                 val bannerMessage by viewModel.vaultBannerMessage.collectAsState()
+                val gmailTestResult by viewModel.gmailTestResult.collectAsState()
                 val modelStates by viewModel.modelStates.collectAsState()
 
                 val runtimePermissionsLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) { _ -> }
 
+                val micPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    if (granted) {
+                        toggleActivityMic(
+                            locale = settings.speechLocale,
+                            currentlyListening = isMicListening,
+                            onListeningState = { active ->
+                                isMicListening = active
+                                if (!active) micRmsLevel = 0f
+                            },
+                            onRmsLevel = { micRmsLevel = it },
+                            onPartialResult = viewModel::updateLivePartialSpeech,
+                            onFinalResult = { spoken ->
+                                if (spoken.isNotBlank()) {
+                                    viewModel.sendChatOrAction(spoken)
+                                } else {
+                                    viewModel.resetGreetingToNamaskaram()
+                                }
+                            }
+                        )
+                    }
+                }
+
                 val safFolderLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocumentTree()
                 ) { uri ->
-                    if (uri != null) viewModel.bindSafFolder(uri)
+                    if (uri != null) {
+                        viewModel.bindSafFolder(uri)
+                        destination = AppDestination.DIALOGUE_VAULT
+                    }
                 }
 
                 val addAudioLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument()
                 ) { uri ->
                     if (uri != null) viewModel.addSingleClipFromPicker(uri)
+                }
+
+                val attachExistingAudioLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    val targetId = pendingAttachDialogueId
+                    if (uri != null && targetId != null) {
+                        viewModel.attachAudioToExistingDialogue(targetId, uri)
+                    }
                 }
 
                 val importModelFileLauncher = rememberLauncherForActivityResult(
@@ -116,128 +198,261 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                Scaffold(
-                    containerColor = GeminiBg,
-                    bottomBar = {
-                        NavigationBar(containerColor = GeminiSurface) {
-                            NavigationBarItem(
-                                selected = selectedTab == 0,
-                                onClick = { selectedTab = 0 },
-                                icon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
-                                label = { Text("Assistant") }
+                val drawerItemColors = NavigationDrawerItemDefaults.colors(
+                    selectedContainerColor = GeminiBlue.copy(alpha = 0.16f),
+                    unselectedContainerColor = Color.Transparent,
+                    selectedIconColor = GeminiBlue,
+                    unselectedIconColor = GeminiTextSecondary,
+                    selectedTextColor = Color.White,
+                    unselectedTextColor = GeminiTextPrimary
+                )
+
+                ModalNavigationDrawer(
+                    drawerState = drawerState,
+                    gesturesEnabled = destination == AppDestination.HOME_ORB || drawerState.isOpen,
+                    drawerContent = {
+                        ModalDrawerSheet(
+                            drawerContainerColor = GeminiSurface,
+                            modifier = Modifier.width(290.dp)
+                        ) {
+                            Spacer(Modifier.height(20.dp))
+                            Text(
+                                text = "മലയാളം AI",
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 20.sp,
+                                modifier = Modifier.padding(horizontal = 20.dp)
                             )
-                            NavigationBarItem(
-                                selected = selectedTab == 1,
-                                onClick = { selectedTab = 1 },
+                            Text(
+                                text = "${dialogues.size} dialogues • ${if (settings.isMalayalamMode) "ML Mode" else "EN Mode"}",
+                                color = GeminiTextSecondary,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            HorizontalDivider(color = GeminiCard)
+                            Spacer(Modifier.height(10.dp))
+
+                            NavigationDrawerItem(
+                                label = { Text("Home (Voice Orb)") },
+                                icon = { Icon(Icons.Default.Home, contentDescription = null) },
+                                selected = destination == AppDestination.HOME_ORB,
+                                colors = drawerItemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                onClick = {
+                                    destination = AppDestination.HOME_ORB
+                                    uiScope.launch { drawerState.close() }
+                                }
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Dialogue Vault") },
                                 icon = { Icon(Icons.Default.GraphicEq, contentDescription = null) },
-                                label = { Text("Dialogue Vault") }
+                                selected = destination == AppDestination.DIALOGUE_VAULT,
+                                colors = drawerItemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                onClick = {
+                                    destination = AppDestination.DIALOGUE_VAULT
+                                    uiScope.launch { drawerState.close() }
+                                }
                             )
-                            NavigationBarItem(
-                                selected = selectedTab == 2,
-                                onClick = { selectedTab = 2 },
-                                icon = { Icon(Icons.Default.Tune, contentDescription = null) },
-                                label = { Text("Models & Settings") }
+
+                            NavigationDrawerItem(
+                                label = { Text("Test Simulator") },
+                                icon = { Icon(Icons.Default.Science, contentDescription = null) },
+                                selected = destination == AppDestination.TEST_SIMULATOR,
+                                colors = drawerItemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                onClick = {
+                                    destination = AppDestination.TEST_SIMULATOR
+                                    uiScope.launch { drawerState.close() }
+                                }
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Recent Activity / Log") },
+                                icon = { Icon(Icons.Default.History, contentDescription = null) },
+                                selected = destination == AppDestination.RECENT_ACTIVITY,
+                                colors = drawerItemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                onClick = {
+                                    destination = AppDestination.RECENT_ACTIVITY
+                                    uiScope.launch { drawerState.close() }
+                                }
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Audio Folder Setup") },
+                                icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                                selected = false,
+                                colors = drawerItemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                onClick = {
+                                    uiScope.launch { drawerState.close() }
+                                    safFolderLauncher.launch(null)
+                                }
+                            )
+
+                            Spacer(Modifier.height(8.dp))
+                            HorizontalDivider(color = GeminiCard)
+                            Spacer(Modifier.height(8.dp))
+
+                            NavigationDrawerItem(
+                                label = { Text("Settings & Gmail Watcher") },
+                                icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                selected = destination == AppDestination.MODELS_SETTINGS,
+                                colors = drawerItemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                onClick = {
+                                    destination = AppDestination.MODELS_SETTINGS
+                                    uiScope.launch { drawerState.close() }
+                                }
                             )
                         }
                     }
-                ) { innerPadding ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                    ) {
-                        when (selectedTab) {
-                            0 -> AssistantTab(
-                                ramStatus = ramStatus,
-                                playbackState = playbackState,
-                                chatHistory = chatHistory,
-                                todos = todos,
-                                isBusy = isChatBusy,
-                                speechLocale = settings.speechLocale,
-                                isMicListening = isMicListening,
-                                onSendPrompt = { prompt ->
-                                    requestActionPermissionsIfNeeded(runtimePermissionsLauncher::launch)
-                                    viewModel.sendChatOrAction(prompt)
-                                },
-                                onStartVoiceInput = { onResult ->
-                                    runtimePermissionsLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+                ) {
+                    when (destination) {
+                        AppDestination.HOME_ORB -> MinimalVoiceHomeScreen(
+                            heroText = heroText,
+                            playbackState = playbackState,
+                            chatHistory = chatHistory,
+                            speechLocale = settings.speechLocale,
+                            isMicListening = isMicListening,
+                            micRmsLevel = micRmsLevel,
+                            onOrbClick = {
+                                viewModel.stopAudio()
+                                val hasMicPerm = ContextCompat.checkSelfPermission(
+                                    this@MainActivity,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (hasMicPerm) {
                                     toggleActivityMic(
                                         locale = settings.speechLocale,
                                         currentlyListening = isMicListening,
-                                        onListeningState = { isMicListening = it },
-                                        onFinalResult = onResult
+                                        onListeningState = { active ->
+                                            isMicListening = active
+                                            if (!active) micRmsLevel = 0f
+                                        },
+                                        onRmsLevel = { micRmsLevel = it },
+                                        onPartialResult = viewModel::updateLivePartialSpeech,
+                                        onFinalResult = { spoken ->
+                                            if (spoken.isNotBlank()) {
+                                                viewModel.sendChatOrAction(spoken)
+                                            }
+                                        }
                                     )
-                                },
-                                onToggleLocale = viewModel::toggleSpeechLocale,
-                                onUnloadRam = viewModel::unloadRamNow,
-                                onStopAudio = viewModel::stopAudio,
-                                onToggleTodo = viewModel::toggleTodoDone,
-                                onDeleteTodo = viewModel::deleteTodo
-                            )
+                                } else {
+                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                            onStopAudio = viewModel::stopAudio,
+                            onOpenDrawer = { uiScope.launch { drawerState.open() } },
+                            onOpenSettings = { destination = AppDestination.MODELS_SETTINGS },
+                            onSendTypedPrompt = { prompt ->
+                                requestActionPermissionsIfNeeded(runtimePermissionsLauncher::launch)
+                                viewModel.sendChatOrAction(prompt)
+                            },
+                            onToggleLocale = viewModel::toggleSpeechLocale
+                        )
 
-                            1 -> DialogueVaultTab(
-                                safTreeUri = settings.safTreeUri,
-                                dialogues = dialogues,
-                                pendingReviews = pendingReviews,
-                                pipelineProgress = pipelineProgress,
-                                playbackState = playbackState,
-                                simulatorResults = simulatorResults,
-                                matchThreshold = settings.matchThreshold,
-                                bannerMessage = bannerMessage,
-                                onPickSafFolder = { safFolderLauncher.launch(null) },
-                                onAddDialogueFile = { addAudioLauncher.launch(arrayOf("audio/*")) },
-                                onScanSafFolder = viewModel::scanAndAutoOrganizeSafFolder,
-                                onPlayDialogue = viewModel::playDialogue,
-                                onPlayPendingUri = { item ->
-                                    viewModel.playRawUri(item.safUriString, item.id, item.title, item.heardText)
-                                },
-                                onStopAudio = viewModel::stopAudio,
-                                onConfirmPending = viewModel::confirmPendingReview,
-                                onAutoAcceptAllPending = viewModel::autoAcceptAllPendingReviews,
-                                onDismissPending = viewModel::dismissPendingReview,
-                                onSaveEditedDialogue = viewModel::saveEditedDialogue,
-                                onDeleteDialogue = viewModel::deleteDialogue,
-                                onRunSimulator = viewModel::runTestSimulator
-                            )
+                        AppDestination.DIALOGUE_VAULT,
+                        AppDestination.TEST_SIMULATOR -> DialogueVaultTab(
+                            titleHeader = if (destination == AppDestination.TEST_SIMULATOR) {
+                                "Test Simulator"
+                            } else {
+                                "Dialogue Vault"
+                            },
+                            focusSimulatorFirst = destination == AppDestination.TEST_SIMULATOR,
+                            safTreeUri = settings.safTreeUri,
+                            dialogues = dialogues,
+                            playableAudioMap = playableAudioMap,
+                            pendingReviews = pendingReviews,
+                            pipelineProgress = pipelineProgress,
+                            playbackState = playbackState,
+                            simulatorResults = simulatorResults,
+                            matchThreshold = settings.matchThreshold,
+                            bannerMessage = bannerMessage,
+                            onBack = { destination = AppDestination.HOME_ORB },
+                            onPickSafFolder = { safFolderLauncher.launch(null) },
+                            onAddDialogueFile = { addAudioLauncher.launch(arrayOf("audio/*")) },
+                            onAttachMp3ToDialogue = { entry ->
+                                pendingAttachDialogueId = entry.id
+                                attachExistingAudioLauncher.launch(arrayOf("audio/*"))
+                            },
+                            onScanSafFolder = viewModel::scanAndAutoOrganizeSafFolder,
+                            onPlayDialogue = viewModel::playDialogue,
+                            onPlayPendingUri = { item ->
+                                viewModel.playRawUri(item.safUriString, item.id, item.title, item.heardText)
+                            },
+                            onStopAudio = viewModel::stopAudio,
+                            onConfirmPending = viewModel::confirmPendingReview,
+                            onAutoAcceptAllPending = viewModel::autoAcceptAllPendingReviews,
+                            onDismissPending = viewModel::dismissPendingReview,
+                            onSaveEditedDialogue = viewModel::saveEditedDialogue,
+                            onDeleteDialogue = viewModel::deleteDialogue,
+                            onRunSimulator = viewModel::runTestSimulator
+                        )
 
-                            2 -> ModelsAndSettingsTab(
-                                ramStatus = ramStatus,
-                                settings = settings,
-                                modelStates = modelStates,
-                                isNotificationAccessEnabled = notifEnabled,
-                                onOpenDefaultAssistantSettings = {
-                                    runCatching {
-                                        startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
-                                    }.onFailure {
-                                        startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
-                                    }
-                                },
-                                onOpenNotificationAccessSettings = {
-                                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                                },
-                                onOpenAppInfoForRestrictedSettings = {
-                                    val intent = Intent(
-                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                        Uri.fromParts("package", packageName, null)
-                                    )
-                                    startActivity(intent)
-                                },
-                                onDownloadModel = viewModel::downloadModel,
-                                onImportLocalModelFile = { model ->
-                                    pendingModelImportTarget = model
-                                    importModelFileLauncher.launch(arrayOf("*/*"))
-                                },
-                                onDeleteModel = viewModel::deleteModel,
-                                onSetLowRamSafeMode = viewModel::setLowRamSafeMode,
-                                onSetEnableGemma4E2b = viewModel::setEnableGemma4E2b,
-                                onSetMatchThreshold = viewModel::setMatchThreshold,
-                                onSetHeadphonesOnly = viewModel::setHeadphonesOnly,
-                                onSetLowBatteryReaction = viewModel::setLowBatteryReaction,
-                                onSetAutoAcceptBulk = viewModel::setAutoAcceptBulk,
-                                onToggleWatchedPackage = viewModel::toggleWatchedPackage,
-                                onSaveHfToken = viewModel::setHfToken
-                            )
-                        }
+                        AppDestination.RECENT_ACTIVITY -> RecentActivityScreen(
+                            chatHistory = chatHistory,
+                            todos = todos,
+                            onBack = { destination = AppDestination.HOME_ORB },
+                            onToggleTodo = viewModel::toggleTodoDone,
+                            onDeleteTodo = viewModel::deleteTodo
+                        )
+
+                        AppDestination.MODELS_SETTINGS -> ModelsAndSettingsTab(
+                            ramStatus = ramStatus,
+                            isDevice2GbClass = viewModel.isDevice2GbClass,
+                            isAndroidGoDevice = viewModel.isAndroidGoDevice,
+                            settings = settings,
+                            modelStates = modelStates,
+                            isNotificationAccessEnabled = notifEnabled,
+                            gmailTestResult = gmailTestResult,
+                            onBack = { destination = AppDestination.HOME_ORB },
+                            onToggleLanguage = viewModel::toggleSpeechLocale,
+                            onSetTtsReplies = viewModel::setTtsRepliesEnabled,
+                            onSaveGmailConfig = viewModel::saveGmailConfig,
+                            onSetGmailWatcherEnabled = { enabled ->
+                                if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    runtimePermissionsLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                                }
+                                viewModel.setGmailWatcherEnabled(enabled)
+                            },
+                            onTestGmailConnection = viewModel::testGmailAndCheckLatest,
+                            onOpenDefaultAssistantSettings = {
+                                runCatching {
+                                    startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+                                }.onFailure {
+                                    startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+                                }
+                            },
+                            onOpenNotificationAccessSettings = {
+                                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                            },
+                            onOpenAppInfoForRestrictedSettings = {
+                                val intent = Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.fromParts("package", packageName, null)
+                                )
+                                startActivity(intent)
+                            },
+                            onDownloadModel = viewModel::downloadModel,
+                            onImportLocalModelFile = { model ->
+                                pendingModelImportTarget = model
+                                importModelFileLauncher.launch(arrayOf("*/*"))
+                            },
+                            onDeleteModel = viewModel::deleteModel,
+                            onSetUltraLight2GbMode = viewModel::setUltraLight2GbMode,
+                            onSetLowRamSafeMode = viewModel::setLowRamSafeMode,
+                            onSetEnableGemma4E2b = viewModel::setEnableGemma4E2b,
+                            onSetMatchThreshold = viewModel::setMatchThreshold,
+                            onSetHeadphonesOnly = viewModel::setHeadphonesOnly,
+                            onSetLowBatteryReaction = viewModel::setLowBatteryReaction,
+                            onSetAutoAcceptBulk = viewModel::setAutoAcceptBulk,
+                            onToggleWatchedPackage = viewModel::toggleWatchedPackage,
+                            onSaveHfToken = viewModel::setHfToken
+                        )
                     }
                 }
             }
@@ -260,6 +475,8 @@ class MainActivity : ComponentActivity() {
         locale: String,
         currentlyListening: Boolean,
         onListeningState: (Boolean) -> Unit,
+        onRmsLevel: (Float) -> Unit,
+        onPartialResult: (String) -> Unit,
         onFinalResult: (String) -> Unit
     ) {
         if (currentlyListening) {
@@ -272,9 +489,15 @@ class MainActivity : ComponentActivity() {
         val rec = SpeechRecognizer.createSpeechRecognizer(this)
         speechRecognizer = rec
         rec.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) = onListeningState(true)
+            override fun onReadyForSpeech(params: Bundle?) {
+                onListeningState(true)
+                onRmsLevel(0.22f)
+            }
             override fun onBeginningOfSpeech() = Unit
-            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onRmsChanged(rmsdB: Float) {
+                val norm = ((rmsdB + 2f) / 12f).coerceIn(0.06f, 1f)
+                onRmsLevel(norm)
+            }
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEndOfSpeech() = onListeningState(false)
             override fun onError(error: Int) = onListeningState(false)
@@ -284,12 +507,17 @@ class MainActivity : ComponentActivity() {
                     ?.firstOrNull().orEmpty()
                 onFinalResult(text)
             }
-            override fun onPartialResults(partialResults: Bundle?) = Unit
+            override fun onPartialResults(partialResults: Bundle?) {
+                val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull().orEmpty()
+                if (partial.isNotBlank()) onPartialResult(partial)
+            }
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
         })
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         }
         rec.startListening(intent)
     }

@@ -2,14 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Network used ONLY for optional post-install model downloads; inference is 100% offline -->
+    <!-- Network used ONLY for optional model downloads or direct Gmail SSL IMAP watcher -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- Live Voice Input (SpeechRecognizer ml-IN / en-IN) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- Daily Actions Router (FunctionGemma 270M tools) -->
+    <!-- Daily Actions Router (Alarms, Contacts, Calendar, Foreground Watcher) -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
@@ -21,10 +21,13 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
-    <!-- Package visibility queries for SpeechRecognizer, Alarms, Calendar, Dialer, and Apps on Android 11+ -->
+    <!-- Package visibility queries for SpeechRecognizer, TTS, Alarms, Dialer, Camera, and Apps on Android 11+ -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -34,7 +37,13 @@
             <action android:name="android.intent.action.SET_ALARM" />
         </intent>
         <intent>
+            <action android:name="android.intent.action.SHOW_ALARMS" />
+        </intent>
+        <intent>
             <action android:name="android.intent.action.DIAL" />
+        </intent>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
         </intent>
     </queries>
 
@@ -48,7 +57,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MalayalamAssistant">
 
-        <!-- Main 3-Tab Gemini-Style App + ACTION_ASSIST entry fallback -->
+        <!-- Minimalist Dark Voice-First Home Activity + ACTION_ASSIST entry -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -78,7 +87,7 @@
             </intent-filter>
         </service>
 
-        <!-- VoiceInteractionSessionService hosting the floating Gemini bottom sheet -->
+        <!-- VoiceInteractionSessionService hosting the floating dark waveform overlay -->
         <service
             android:name=".assistant.AssistantVoiceInteractionSessionService"
             android:exported="true"
@@ -95,7 +104,7 @@
             </intent-filter>
         </service>
 
-        <!-- Background Notification Listener for Situation-Matched Malayalam Audio Reactions -->
+        <!-- Background Notification Listener (for standard non-Go Android phones) -->
         <service
             android:name=".service.DialogueNotificationListenerService"
             android:exported="true"
@@ -105,6 +114,12 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- Built-In SSL IMAP Gmail Direct Watcher (Works on 2 GB RAM / Android Go phones!) -->
+        <service
+            android:name=".service.GmailDirectWatcherService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- Low-Battery Broadcast Receiver -->
         <receiver

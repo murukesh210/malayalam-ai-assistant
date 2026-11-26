@@ -32,9 +32,12 @@ data class UserSettings(
     // Google AI Studio (Gemini API) Brain + Expressive TTS
     val geminiApiKeyEncrypted: String = "",
     val geminiVoiceName: String = "Kore",
-    // Automatic Bank & Message SMS Auto-Reaction + Always-On Keep-Alive
+    // Automatic Bank & Message SMS Auto-Reaction + Always-On Keep-Alive + Continuous Live Mode + Voice Pack
     val smsAutoReactEnabled: Boolean = false,
     val alwaysOnKeepAliveEnabled: Boolean = true,
+    val continuousLiveMode: Boolean = true,
+    val backgroundModeActive: Boolean = false,
+    val activePackId: String = VoicePack.DEFAULT_PACK_ID,
     // Direct SSL IMAP Gmail Watcher (Android Go / 2 GB RAM)
     val gmailWatcherEnabled: Boolean = false,
     val gmailAddress: String = "",
@@ -87,6 +90,9 @@ class AppPreferences(private val context: Context) {
         val GEMINI_VOICE_NAME = stringPreferencesKey("gemini_voice_name")
         val SMS_AUTO_REACT = booleanPreferencesKey("sms_auto_react_enabled")
         val ALWAYS_ON_KEEP_ALIVE = booleanPreferencesKey("always_on_keep_alive_enabled")
+        val CONTINUOUS_LIVE_MODE = booleanPreferencesKey("continuous_live_mode")
+        val BACKGROUND_MODE_ACTIVE = booleanPreferencesKey("background_mode_active")
+        val ACTIVE_PACK_ID = stringPreferencesKey("active_pack_id")
         val GMAIL_WATCHER_ENABLED = booleanPreferencesKey("gmail_watcher_enabled")
         val GMAIL_ADDRESS = stringPreferencesKey("gmail_address")
         val GMAIL_ENC_APP_PASSWORD = stringPreferencesKey("gmail_enc_app_password")
@@ -116,6 +122,9 @@ class AppPreferences(private val context: Context) {
             geminiVoiceName = prefs[Keys.GEMINI_VOICE_NAME] ?: "Kore",
             smsAutoReactEnabled = prefs[Keys.SMS_AUTO_REACT] ?: false,
             alwaysOnKeepAliveEnabled = prefs[Keys.ALWAYS_ON_KEEP_ALIVE] ?: true,
+            continuousLiveMode = prefs[Keys.CONTINUOUS_LIVE_MODE] ?: true,
+            backgroundModeActive = prefs[Keys.BACKGROUND_MODE_ACTIVE] ?: false,
+            activePackId = prefs[Keys.ACTIVE_PACK_ID] ?: VoicePack.DEFAULT_PACK_ID,
             gmailWatcherEnabled = prefs[Keys.GMAIL_WATCHER_ENABLED] ?: false,
             gmailAddress = prefs[Keys.GMAIL_ADDRESS] ?: "",
             gmailEncryptedAppPassword = prefs[Keys.GMAIL_ENC_APP_PASSWORD] ?: "",
@@ -147,6 +156,21 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setAlwaysOnKeepAliveEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.ALWAYS_ON_KEEP_ALIVE] = enabled }
+    }
+
+    suspend fun setContinuousLiveMode(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.CONTINUOUS_LIVE_MODE] = enabled }
+    }
+
+    suspend fun setBackgroundModeActive(active: Boolean) {
+        context.dataStore.edit {
+            it[Keys.BACKGROUND_MODE_ACTIVE] = active
+            if (active) it[Keys.ALWAYS_ON_KEEP_ALIVE] = true
+        }
+    }
+
+    suspend fun setActivePackId(packId: String) {
+        context.dataStore.edit { it[Keys.ACTIVE_PACK_ID] = packId }
     }
 
     suspend fun setSpeakAfterDialogueClip(enabled: Boolean) {

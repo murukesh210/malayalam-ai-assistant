@@ -93,19 +93,21 @@ class IncomingMessageReactor(private val context: Context) {
 
         try {
             val apiKey = graph.prefs.getDecryptedGeminiApiKey()
-            val vaultEntries = graph.vaultRepository.dialogues.value
+            val activePack = graph.voicePackRepository.getActivePackMeta()
+            val vaultEntries = graph.voicePackRepository.activeDialogues.value
 
-            // 1. Primary: Google AI Studio Gemini Brain (understands Manglish/Malayalam/English!)
+            // 1. Primary: Google AI Studio Gemini Brain (Specificity-First + Active Pack Persona!)
             if (apiKey.isNotBlank()) {
                 val summaries = GeminiBrainClient.toVaultSummaries(vaultEntries) {
-                    graph.vaultRepository.hasPlayableAudio(it)
+                    graph.voicePackRepository.hasPlayableAudio(it)
                 }
                 val aiDecision = graph.geminiBrainClient.analyzeIncomingMessage(
                     apiKey = apiKey,
                     sender = sender.ifBlank { source },
                     source = source,
                     messageText = cleanMsg,
-                    vaultDialogues = summaries
+                    vaultDialogues = summaries,
+                    packPersonaInstruction = activePack.personaInstruction
                 )
 
                 if (aiDecision != null) {
@@ -115,7 +117,7 @@ class IncomingMessageReactor(private val context: Context) {
                     }
 
                     val targetDialogue = aiDecision.playDialogueId?.let { id ->
-                        vaultEntries.firstOrNull { it.id == id && graph.vaultRepository.hasPlayableAudio(it) }
+                        vaultEntries.firstOrNull { it.id == id && graph.voicePackRepository.hasPlayableAudio(it) }
                     }
 
                     val dedupId = targetDialogue?.id ?: "gemini_tts_$source"
@@ -129,13 +131,12 @@ class IncomingMessageReactor(private val context: Context) {
                     if (targetDialogue != null) {
                         val played = graph.audioPlayer.playEntry(targetDialogue)
                         if (played) {
-                            val note = "🔊 Played '${targetDialogue.title}'"
+                            val note = "🔊 Played '${targetDialogue.title}' (${activePack.packName})"
                             recordMonitorLog(source, sender, cleanMsg, note)
                             return note
                         }
                     }
 
-                    // No MP3 linked for this situation yet -> speak witty Malayalam reaction via streaming Gemini TTS!
                     if (aiDecision.replyMalayalam.isNotBlank()) {
                         val note = "🗣️ ${aiDecision.replyMalayalam.take(55)}"
                         recordMonitorLog(source, sender, cleanMsg, note)
@@ -143,7 +144,7 @@ class IncomingMessageReactor(private val context: Context) {
                             text = aiDecision.replyMalayalam,
                             apiKey = apiKey,
                             ttsClient = graph.geminiTtsClient,
-                            voiceName = settings.geminiVoiceName,
+                            voiceName = activePack.ttsVoice.ifBlank { settings.geminiVoiceName },
                             ttsStyle = aiDecision.ttsStyle,
                             preferMalayalam = settings.isMalayalamMode
                         )
@@ -154,12 +155,13 @@ class IncomingMessageReactor(private val context: Context) {
                 }
             }
 
-            // 2. Instant Offline Fallback (when offline or API key not set)
+            // 2. Instant Offline Polarity-Safe & Specificity-First Fallback
             val threshold = settings.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
             val winner = graph.embeddingMatcher.rankDialogues(
                 rawQuery = "$sender $cleanMsg",
                 appPackageHint = appPackageHint,
                 requirePlayableAudio = true,
+                overrideDialogues = vaultEntries,
                 topK = 1
             ).firstOrNull()
 

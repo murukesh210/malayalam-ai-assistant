@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -58,11 +59,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.malayalam.assistant.audio.PlaybackState
+import com.malayalam.assistant.audio.VoiceSessionState
 import com.malayalam.assistant.data.TodoEntity
 import com.malayalam.assistant.ui.ChatTurn
 import com.malayalam.assistant.ui.components.FourPointSparkleButton
 import com.malayalam.assistant.ui.components.GlowingWaveformOrb
 import com.malayalam.assistant.ui.components.SoftGlowIconButton
+import com.malayalam.assistant.ui.theme.GeminiAmber
 import com.malayalam.assistant.ui.theme.GeminiBlue
 import com.malayalam.assistant.ui.theme.GeminiCard
 import com.malayalam.assistant.ui.theme.GeminiCoral
@@ -72,29 +75,40 @@ import com.malayalam.assistant.ui.theme.GeminiSurface
 import com.malayalam.assistant.ui.theme.GeminiTextPrimary
 import com.malayalam.assistant.ui.theme.GeminiTextSecondary
 import com.malayalam.assistant.ui.theme.GeminiViolet
+import com.malayalam.assistant.ui.theme.OrbBorderSubtle
 import com.malayalam.assistant.ui.theme.WavePurple
 import com.malayalam.assistant.ui.theme.matteCharcoalGradient
 
 /**
  * Minimalist Dark Voice-First Home Interface:
- *  - Full-screen matte dark charcoal gradient (`#18191D` -> `#212228`).
- *  - Top-left `☰` Hamburger Menu & Top-right `⚙️` Settings Gear with subtle radial glow.
- *  - Center Hero: `നമസ്കാരം` greeting (transitions smoothly to `കേൾക്കുന്നു...`, live reply, or playing clip + Stop pill)
- *    above the `172.dp` Glowing Cyan-to-Violet Waveform Orb.
- *  - Bottom-right subtle `✦` four-point sparkle toggling a slide-up Text Input & Quick Actions sheet.
+ *  - Matte dark charcoal gradient (`#18191D` -> `#212228`).
+ *  - Minimal Top Bar (`☰` left, compact Active Pack chip center, `⚙️` right).
+ *  - Center Hero: Malayalam greeting / live status + `172.dp` Glowing Cyan-to-Violet Waveform Orb
+ *    + subtle `"⏹ Stop Listening"` pill ONLY while a continuous live session is active.
+ *  - Clean **"Background Mode"** pill near the bottom (`OFF` / glowing green `Active` + `Minimize`)
+ *    + bottom-right subtle four-point sparkle (`✦`) opening the slide-up text composer.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MinimalVoiceHomeScreen(
     heroText: String,
+    activePackName: String,
+    voiceSessionState: VoiceSessionState,
     playbackState: PlaybackState,
     chatHistory: List<ChatTurn>,
     speechLocale: String,
-    isMicListening: Boolean,
+    isFallbackMicListening: Boolean,
     isThinking: Boolean,
     micRmsLevel: Float,
+    backgroundModeActive: Boolean,
+    missingBgPermissionHint: Boolean,
     onOrbClick: () -> Unit,
+    onStopLiveSession: () -> Unit,
     onStopAudio: () -> Unit,
+    onToggleBackgroundMode: () -> Unit,
+    onMinimizeToBackground: () -> Unit,
+    onOpenBgPermissionsSetup: () -> Unit,
+    onOpenVoicePacks: () -> Unit,
     onOpenDrawer: () -> Unit,
     onOpenSettings: () -> Unit,
     onSendTypedPrompt: (String) -> Unit,
@@ -102,10 +116,21 @@ fun MinimalVoiceHomeScreen(
 ) {
     var showSparkleInputSheet by rememberSaveable { mutableStateOf(false) }
 
+    val isLiveSessionActive = voiceSessionState != VoiceSessionState.IDLE
+    val isListeningOrb = voiceSessionState == VoiceSessionState.LISTENING ||
+        voiceSessionState == VoiceSessionState.RECORDING_SPEECH ||
+        isFallbackMicListening
+    val isThinkingOrb = voiceSessionState == VoiceSessionState.THINKING || isThinking
+
     val displayHeadline = when {
-        isMicListening -> if (speechLocale.startsWith("ml")) "കേൾക്കുന്നു..." else "Listening..."
-        isThinking -> if (speechLocale.startsWith("ml")) "ചിന്തിക്കുന്നു..." else "Thinking..."
-        playbackState.isPlaying -> playbackState.activeTitle.ifBlank { "Playing..." }
+        voiceSessionState == VoiceSessionState.RECORDING_SPEECH ->
+            if (speechLocale.startsWith("ml")) "കേൾക്കുന്നു..." else "Listening..."
+        voiceSessionState == VoiceSessionState.LISTENING || isFallbackMicListening ->
+            if (speechLocale.startsWith("ml")) "കേൾക്കുന്നു..." else "Listening..."
+        isThinkingOrb ->
+            if (speechLocale.startsWith("ml")) "ചിന്തിക്കുന്നു..." else "Thinking..."
+        playbackState.isPlaying ->
+            playbackState.activeTitle.ifBlank { heroText }
         else -> heroText
     }
 
@@ -116,7 +141,7 @@ fun MinimalVoiceHomeScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // 1. Minimal Top Bar (☰ Left, ⚙️ Right)
+        // 1. Minimal Top Bar: ☰ Left, Active Voice Pack Chip Center, ⚙️ Right
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -134,6 +159,33 @@ fun MinimalVoiceHomeScreen(
                 )
             }
 
+            // Compact Active Pack Chip (`🎬 Mammootty Pack` / `🎬 My Custom Pack`)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(GeminiSurface.copy(alpha = 0.85f))
+                    .border(1.dp, OrbBorderSubtle, RoundedCornerShape(20.dp))
+                    .clickable(onClick = onOpenVoicePacks)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Movie,
+                    contentDescription = null,
+                    tint = GeminiViolet,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = activePackName,
+                    color = GeminiTextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
             SoftGlowIconButton(onClick = onOpenSettings) {
                 Icon(
                     imageVector = Icons.Default.Settings,
@@ -144,7 +196,7 @@ fun MinimalVoiceHomeScreen(
             }
         }
 
-        // 2. Center Hero Area: Greeting / Live Status + Glowing Waveform Orb
+        // 2. Center Hero Area: Greeting / Live Status + Glowing Waveform Orb + Stop Pill
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -167,56 +219,138 @@ fun MinimalVoiceHomeScreen(
                 )
             }
 
-            // Compact Stop pill when a Malayalam dialogue clip is actively playing
-            if (playbackState.isPlaying) {
-                Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
+
+            GlowingWaveformOrb(
+                isListening = isListeningOrb,
+                isPlaying = playbackState.isPlaying || isThinkingOrb,
+                micLevel = when {
+                    voiceSessionState == VoiceSessionState.RECORDING_SPEECH -> micRmsLevel.coerceAtLeast(0.28f)
+                    voiceSessionState == VoiceSessionState.LISTENING -> 0.16f
+                    isThinkingOrb -> 0.35f
+                    else -> micRmsLevel
+                },
+                onClick = onOrbClick
+            )
+
+            Spacer(Modifier.height(14.dp))
+
+            // Clean subtle "Stop Listening (⏹)" pill ONLY while continuous live session or audio is active
+            if (isLiveSessionActive || playbackState.isPlaying) {
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
+                        .clip(RoundedCornerShape(22.dp))
                         .background(GeminiCard)
-                        .border(1.dp, WavePurple.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
-                        .clickable(onClick = onStopAudio)
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                        .border(1.dp, WavePurple.copy(alpha = 0.45f), RoundedCornerShape(22.dp))
+                        .clickable {
+                            if (isLiveSessionActive) onStopLiveSession() else onStopAudio()
+                        }
+                        .padding(horizontal = 16.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Default.Stop,
-                        contentDescription = "Stop",
+                        contentDescription = "Stop Listening",
                         tint = GeminiCoral,
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = if (speechLocale.startsWith("ml")) "നിർത്തുക (Stop)" else "Stop Audio",
+                        text = if (isLiveSessionActive) {
+                            if (speechLocale.startsWith("ml")) "നിർത്തുക (Stop Listening)" else "Stop Listening"
+                        } else {
+                            if (speechLocale.startsWith("ml")) "ഓഡിയോ നിർത്തുക" else "Stop Audio"
+                        },
                         color = GeminiTextPrimary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
             } else {
-                Spacer(Modifier.height(22.dp))
+                Spacer(Modifier.height(34.dp))
             }
-
-            Spacer(Modifier.height(14.dp))
-
-            GlowingWaveformOrb(
-                isListening = isMicListening,
-                isPlaying = playbackState.isPlaying || isThinking,
-                micLevel = if (isThinking) 0.35f else micRmsLevel,
-                onClick = onOrbClick
-            )
         }
 
-        // 3. Clutter-Free Bottom Area: Subtle Four-Point Sparkle (`✦`) in Bottom-Right
+        // 3. Bottom Area: One-Tap "Background Mode" Pill (Centered) + Subtle `✦` Sparkle (Bottom-Right)
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 18.dp, start = 16.dp, end = 64.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (backgroundModeActive && missingBgPermissionHint) {
+                Text(
+                    text = "⚠️ Grant Notification / SMS Access → Tap here",
+                    color = GeminiAmber,
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .padding(bottom = 8.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(GeminiSurface)
+                        .clickable(onClick = onOpenBgPermissionsSetup)
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                )
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(
+                            if (backgroundModeActive) GeminiMint.copy(alpha = 0.14f) else GeminiSurface.copy(alpha = 0.9f)
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (backgroundModeActive) GeminiMint.copy(alpha = 0.7f) else OrbBorderSubtle,
+                            shape = RoundedCornerShape(24.dp)
+                        )
+                        .clickable(onClick = onToggleBackgroundMode)
+                        .padding(horizontal = 16.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (backgroundModeActive) GeminiMint else GeminiTextSecondary.copy(alpha = 0.5f))
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (backgroundModeActive) "Background Mode • Active" else "Background Mode",
+                        color = if (backgroundModeActive) GeminiMint else GeminiTextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                if (backgroundModeActive) {
+                    Text(
+                        text = "Minimize",
+                        color = GeminiBlue,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(GeminiSurface)
+                            .border(1.dp, OrbBorderSubtle, RoundedCornerShape(20.dp))
+                            .clickable(onClick = onMinimizeToBackground)
+                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                    )
+                }
+            }
+        }
+
         FourPointSparkleButton(
             onClick = { showSparkleInputSheet = true },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 18.dp, bottom = 16.dp)
+                .padding(end = 14.dp, bottom = 14.dp)
         )
     }
 
-    // Slide-Up Minimalist Text Input & Quick Actions Sheet (toggled by `✦`)
     if (showSparkleInputSheet) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         var typedText by rememberSaveable { mutableStateOf("") }
@@ -233,7 +367,6 @@ fun MinimalVoiceHomeScreen(
                     .navigationBarsPadding()
                     .padding(horizontal = 18.dp, vertical = 8.dp)
             ) {
-                // Language pill + Quick Action suggestions
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -256,10 +389,9 @@ fun MinimalVoiceHomeScreen(
                         )
                     )
                     listOf(
-                        "സെറ്റ് അലാം",
+                        "അലാറം വെക്കണം",
                         "രാവിലെ 6:30 അലാം",
                         "വാട്സ്ആപ്പ് തുറക്ക്",
-                        "ചാർജ് എത്ര",
                         "You failed in your exam"
                     ).forEach { chip ->
                         AssistChip(
@@ -276,7 +408,6 @@ fun MinimalVoiceHomeScreen(
                     }
                 }
 
-                // Show last 3 messages subtly if any exist
                 val recent = chatHistory.takeLast(3)
                 if (recent.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
@@ -311,11 +442,7 @@ fun MinimalVoiceHomeScreen(
                         modifier = Modifier.weight(1f),
                         placeholder = {
                             Text(
-                                text = if (speechLocale.startsWith("ml")) {
-                                    "ടൈപ്പ് ചെയ്യുക (ഉദാ: സെറ്റ് അലാം, വാട്സ്ആപ്പ് തുറക്ക്)..."
-                                } else {
-                                    "Type a command (e.g. set an alarm, open WhatsApp)..."
-                                },
+                                text = if (speechLocale.startsWith("ml")) "ടൈപ്പ് ചെയ്യുക..." else "Type a command...",
                                 color = GeminiTextSecondary,
                                 fontSize = 13.sp
                             )
@@ -359,9 +486,6 @@ fun MinimalVoiceHomeScreen(
     }
 }
 
-/**
- * Secondary Drawer Destination: Recent Activity / Chat Log + Offline To-Do List.
- */
 @Composable
 fun RecentActivityScreen(
     chatHistory: List<ChatTurn>,
@@ -397,12 +521,7 @@ fun RecentActivityScreen(
         ) {
             if (todos.isNotEmpty()) {
                 item {
-                    Text(
-                        text = "Saved Reminders / To-Dos",
-                        color = GeminiViolet,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp
-                    )
+                    Text("Saved Reminders / To-Dos", color = GeminiViolet, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 }
                 items(todos, key = { "todo_${it.id}" }) { todo ->
                     Row(
@@ -436,18 +555,13 @@ fun RecentActivityScreen(
             }
 
             item {
-                Text(
-                    text = "Voice & Command Log",
-                    color = GeminiBlue,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp
-                )
+                Text("Voice & Command Log", color = GeminiBlue, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             }
 
             if (chatHistory.isEmpty()) {
                 item {
                     Text(
-                        text = "No commands spoken yet. Tap the glowing orb on Home to speak!",
+                        text = "No commands spoken yet. Tap the glowing orb on Home to start a live session!",
                         color = GeminiTextSecondary,
                         fontSize = 13.sp
                     )
@@ -471,11 +585,7 @@ fun RecentActivityScreen(
                         Text(text = turn.text, color = GeminiTextPrimary, fontSize = 14.sp)
                         if (turn.triggeredClipTitle != null) {
                             Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "🔊 ${turn.triggeredClipTitle}",
-                                color = GeminiMint,
-                                fontSize = 11.sp
-                            )
+                            Text(text = "🔊 ${turn.triggeredClipTitle}", color = GeminiMint, fontSize = 11.sp)
                         }
                     }
                 }

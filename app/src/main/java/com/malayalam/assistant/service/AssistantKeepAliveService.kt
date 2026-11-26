@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.malayalam.assistant.AppGraph
 import com.malayalam.assistant.MainActivity
@@ -21,8 +22,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * Lightweight `START_STICKY` Foreground Service keeping WhatsApp, SMS, GPay/PhonePe, and
- * Notification Malayalam dialogue reactions alive even when the app is swiped closed!
+ * Android 14–17 Compliant `mediaPlayback` Foreground Service for One-Tap Background Mode:
+ *  - Started explicitly from the Home Screen "Background Mode" toggle using
+ *    `ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK` (no 6-hour `dataSync` timeout!).
+ *  - Keeps background Malayalam dialogue & TTS reactions working when switching apps or locking the screen.
+ *  - Includes a direct **"Stop Background Mode"** action button inside the persistent notification.
  */
 class AssistantKeepAliveService : Service() {
 
@@ -34,18 +38,24 @@ class AssistantKeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent?.action == ACTION_STOP || intent?.action == ACTION_STOP_FROM_NOTIFICATION) {
+            if (intent.action == ACTION_STOP_FROM_NOTIFICATION) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    AppGraph.from(applicationContext).prefs.setBackgroundModeActive(false)
+                }
+            }
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
 
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
         } else {
-            startForeground(NOTIF_ID, notification)
+            0
         }
+        ServiceCompat.startForeground(this, NOTIF_ID, notification, fgsType)
         return START_STICKY
     }
 
@@ -54,10 +64,10 @@ class AssistantKeepAliveService : Service() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Background Message Reactions",
-                NotificationManager.IMPORTANCE_MIN
+                "Background Mode (Dialogue Playback)",
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps Malayalam Assistant listening for WhatsApp, SMS, and notification reactions"
+                description = "Keeps Malayalam Assistant ready for background WhatsApp, SMS & Gmail audio reactions"
                 setShowBadge(false)
             }
             nm.createNotificationChannel(channel)
@@ -65,27 +75,38 @@ class AssistantKeepAliveService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val pendingIntent = PendingIntent.getActivity(
+        val openIntent = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val stopIntent = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, AssistantKeepAliveService::class.java).apply {
+                action = ACTION_STOP_FROM_NOTIFICATION
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_spark)
-            .setContentTitle("Malayalam Assistant")
-            .setContentText("Malayalam Assistant listening for messages")
+            .setContentTitle("Malayalam Assistant • Background Mode")
+            .setContentText("Listening for WhatsApp, SMS & Gmail dialogue reactions")
             .setOngoing(true)
             .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setContentIntent(pendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(openIntent)
+            .addAction(0, "Stop Background Mode", stopIntent)
             .build()
     }
 
     companion object {
-        private const val CHANNEL_ID = "assistant_keep_alive_channel"
+        private const val CHANNEL_ID = "assistant_background_media_channel"
         private const val NOTIF_ID = 4101
         private const val ACTION_STOP = "com.malayalam.assistant.STOP_KEEP_ALIVE"
+        private const val ACTION_STOP_FROM_NOTIFICATION = "com.malayalam.assistant.STOP_BG_MODE_NOTIF"
 
         fun syncServiceState(context: Context, enabled: Boolean) {
             val appCtx = context.applicationContext
@@ -107,9 +128,6 @@ class AssistantKeepAliveService : Service() {
     }
 }
 
-/**
- * Automatically restarts Always-On Background Message Reactions & Gmail Direct Watcher after reboot.
- */
 class BootCompletedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val act = intent?.action ?: return
@@ -120,7 +138,7 @@ class BootCompletedReceiver : BroadcastReceiver() {
             try {
                 val graph = AppGraph.from(context)
                 val settings = graph.prefs.snapshot()
-                if (settings.alwaysOnKeepAliveEnabled) {
+                if (settings.backgroundModeActive || settings.alwaysOnKeepAliveEnabled) {
                     AssistantKeepAliveService.syncServiceState(context, true)
                 }
                 if (settings.gmailWatcherEnabled && settings.gmailAddress.isNotBlank()) {

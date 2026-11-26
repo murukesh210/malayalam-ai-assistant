@@ -92,6 +92,7 @@ import com.malayalam.assistant.worker.PipelineProgressUi
 @Composable
 fun DialogueVaultTab(
     titleHeader: String = "My Dialogues",
+    activePackName: String = "My Custom Pack",
     focusSimulatorFirst: Boolean = false,
     safTreeUri: String,
     dialogues: List<DialogueEntry>,
@@ -105,6 +106,7 @@ fun DialogueVaultTab(
     bannerMessage: String,
     editorDraft: DialogueEditorDraft?,
     onBack: () -> Unit,
+    onOpenVoicePacks: () -> Unit,
     onOpenAddDialogueSheet: () -> Unit,
     onOpenEditDialogueSheet: (DialogueEntry) -> Unit,
     onCloseEditorSheet: () -> Unit,
@@ -284,7 +286,7 @@ fun DialogueVaultTab(
                     }
                 }
 
-                // My Dialogues Section Immediately Visible!
+                // My Dialogues Section Immediately Visible + Quick Pack Switch Chip!
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -296,6 +298,14 @@ fun DialogueVaultTab(
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 15.sp,
                             modifier = Modifier.weight(1f)
+                        )
+                        AssistChip(
+                            onClick = onOpenVoicePacks,
+                            label = { Text("🎬 $activePackName", fontSize = 11.sp, maxLines = 1, softWrap = false) },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = GeminiCard,
+                                labelColor = GeminiBlue
+                            )
                         )
                     }
                 }
@@ -476,6 +486,24 @@ private fun AddEditDialogueSheetContent(
             maxLines = 4,
             modifier = Modifier.fillMaxWidth()
         )
+
+        // Scope Toggle: Specific Event vs Broad Mood (for Specificity-First Semantic Rubric!)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Scope:", color = GeminiTextSecondary, fontSize = 12.sp)
+            FilterChip(
+                selected = draft.scope != "broad",
+                onClick = { onUpdate { it.copy(scope = "specific") } },
+                label = { Text("Specific Event", fontSize = 12.sp) }
+            )
+            FilterChip(
+                selected = draft.scope == "broad",
+                onClick = { onUpdate { it.copy(scope = "broad") } },
+                label = { Text("Broad Mood", fontSize = 12.sp) }
+            )
+        }
 
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),

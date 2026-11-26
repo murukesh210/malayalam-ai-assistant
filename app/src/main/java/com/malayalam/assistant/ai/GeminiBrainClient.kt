@@ -58,6 +58,7 @@ data class VaultDialogueSummary(
     val id: String,
     val title: String,
     val situations: List<String>,
+    val scope: String = "specific", // "specific" | "broad"
     val hasAudio: Boolean
 )
 
@@ -86,12 +87,17 @@ class GeminiBrainClient {
         screenContext: String? = null,
         recentTurns: List<ConversationHistoryItem> = emptyList(),
         vaultDialogues: List<VaultDialogueSummary>,
+        packPersonaInstruction: String = "",
         preferMalayalam: Boolean = true
     ): GeminiBrainResponse? = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
         if (cleanKey.isBlank()) return@withContext null
 
-        val systemInstruction = buildAssistantSystemInstruction(vaultDialogues, preferMalayalam)
+        val systemInstruction = buildAssistantSystemInstruction(
+            vault = vaultDialogues,
+            packPersonaInstruction = packPersonaInstruction,
+            preferMalayalam = preferMalayalam
+        )
         val contents = buildJsonArray {
             // Include last 6 conversation turns for natural multi-turn follow-ups (e.g. "Which time?" -> "6:30 AM")
             recentTurns.takeLast(6).forEach { turn ->
@@ -154,12 +160,13 @@ class GeminiBrainClient {
         sender: String,
         source: String,
         messageText: String,
-        vaultDialogues: List<VaultDialogueSummary>
+        vaultDialogues: List<VaultDialogueSummary>,
+        packPersonaInstruction: String = ""
     ): GeminiBrainResponse? = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
         if (cleanKey.isBlank()) return@withContext null
 
-        val systemInstruction = buildIncomingReactorInstruction(vaultDialogues)
+        val systemInstruction = buildIncomingReactorInstruction(vaultDialogues, packPersonaInstruction)
         val contents = buildJsonArray {
             add(buildJsonObject {
                 put("role", "user")
@@ -472,60 +479,76 @@ class GeminiBrainClient {
     }
 
     private fun formatVaultForPrompt(vault: List<VaultDialogueSummary>): String {
-        if (vault.isEmpty()) return "[]"
-        return vault.joinToString(prefix = "[", postfix = "]") { d ->
-            val sits = d.situations.take(7).joinToString(", ")
-            """{"id":"${d.id}","title":"${d.title}","hasAudio":${d.hasAudio},"situations":"$sits"}"""
+        val playableOnly = vault.filter { it.hasAudio }
+        if (playableOnly.isEmpty()) return "[]"
+        return playableOnly.joinToString(prefix = "[", postfix = "]") { d ->
+            val whenToPlay = d.situations.take(8).joinToString(", ").replace("\"", "'")
+            val safeName = d.title.replace("\"", "'")
+            """{"id":"${d.id}","name":"$safeName","whenToPlay":"$whenToPlay","scope":"${d.scope}"}"""
         }
     }
 
     private fun buildAssistantSystemInstruction(
         vault: List<VaultDialogueSummary>,
+        packPersonaInstruction: String,
         preferMalayalam: Boolean
     ): String {
         val nowTime = SimpleDateFormat("HH:mm (EEEE)", Locale.getDefault()).format(Date())
+        val personaLine = packPersonaInstruction.ifBlank {
+            "Warm, witty, natural Malayalam friend style."
+        }
         val langNote = if (preferMalayalam) {
-            "Write replyMalayalam in warm, witty, natural conversational Malayalam (1-2 short sentences)."
+            "Write replyMalayalam in natural conversational Malayalam (1-2 short sentences) in this persona style: $personaLine"
         } else {
-            "Write replyMalayalam in friendly, concise English or Manglish (1-2 short sentences)."
+            "Write replyMalayalam in concise English/Manglish (1-2 short sentences) in this persona style: $personaLine"
         }
         return """
-            You are a warm, witty Malayalam AI smartphone assistant. Current local device time: $nowTime.
+            You are a Malayalam AI smartphone assistant. Current local device time: $nowTime.
             $langNote
             You understand natural Malayalam, Manglish, and English speech and text.
 
-            Stored User Movie Dialogue Vault:
+            Active Voice Pack Playable Dialogues:
             ${formatVaultForPrompt(vault)}
 
-            Rules:
-            1. If the user expresses a situation matching one of the stored dialogues AND its hasAudio is true, set "playDialogueId" to that exact dialogue "id". Otherwise null.
-            2. Alarm Rules:
-               - If the user wants to set an alarm WITHOUT specifying a time (e.g. "set an alarm" / "അലാറം വെക്കണം"):
-                 set action.type = "none", expectFollowUp = true, and replyMalayalam = "എത്ര മണിക്കാണ് അലാറം വെക്കേണ്ടത്?".
-               - If the user gives a time (either directly or answering your previous question like "6:30 morning" / "രാവിലെ ആറര"):
-                 set action.type = "set_alarm", action.hour = <0..23>, action.minute = <0..59>, action.label = "Assistant Alarm", expectFollowUp = false, and confirm in replyMalayalam!
-            3. Other actions:
-               - open_app: {"type":"open_app","value":"WhatsApp"}
-               - dial_call: {"type":"dial_call","value":"Amma"}
-               - add_todo: {"type":"add_todo","value":"Pay KSEB bill"}
-            4. Respond ONLY with compact JSON:
+            SPECIFICITY-FIRST DIALOGUE SELECTION RUBRIC (CRITICAL):
+            1. Analyze the full real-world event, meaning, and emotional tone of the user's speech/text (Malayalam, Manglish, English).
+            2. Read every dialogue's "whenToPlay" carefully (understand slang & synonyms like "eda paisa ayachittund" = money received / happy news; "exam pass aayi" = exam passed / happy news).
+            3. SPECIFICITY RULE:
+               - If a SPECIFIC dialogue (scope="specific") matches the exact event (e.g. "exam passed" OR "money credited"), ALWAYS pick that specific dialogue over a broad mood dialogue (scope="broad" like "happy things").
+               - If NO specific dialogue exists for that exact event, fall back to a matching BROAD mood dialogue (scope="broad", e.g., if only "happy things" exists and no "money" dialogue exists, "money credited" MUST match "happy things"!).
+               - NEVER mismatch opposites: "exam passed" MUST NEVER match "exam failed"; "money credited" MUST NEVER match "money debited"!
+            4. Alarm Rules:
+               - If the user wants to set an alarm WITHOUT a time: set action.type="none", expectFollowUp=true, replyMalayalam="എത്ര മണിക്കാണ് അലാറം വെക്കേണ്ടത്?".
+               - If a time is known (now or from previous turn): set action.type="set_alarm", action.hour=<0..23>, action.minute=<0..59>, action.label="Assistant Alarm", expectFollowUp=false.
+            5. Other actions: open_app, dial_call, add_todo.
+            6. Respond ONLY with compact JSON:
                {"heardTranscript":"...","replyMalayalam":"...","playDialogueId":null,"expectFollowUp":false,"action":{"type":"none","hour":null,"minute":null,"label":"","value":""},"ttsStyle":"cheerful and friendly"}
         """.trimIndent()
     }
 
-    private fun buildIncomingReactorInstruction(vault: List<VaultDialogueSummary>): String = """
-        You react to incoming WhatsApp messages, SMS, GPay/PhonePe alerts, and Gmail emails for a Malayalam user.
-        Stored User Movie Dialogue Vault:
-        ${formatVaultForPrompt(vault)}
+    private fun buildIncomingReactorInstruction(
+        vault: List<VaultDialogueSummary>,
+        packPersonaInstruction: String
+    ): String {
+        val personaLine = packPersonaInstruction.ifBlank { "Warm, witty Malayalam friend style." }
+        return """
+            You react to incoming WhatsApp messages, SMS, GPay/PhonePe alerts, and Gmail emails for a Malayalam user.
+            Active Voice Pack Persona: $personaLine
+            Active Voice Pack Playable Dialogues:
+            ${formatVaultForPrompt(vault)}
 
-        Rules:
-        1. Set "shouldReact": false ONLY for OTPs, spam, ads, marketing promos, or boring automated tracking.
-           ALWAYS set "shouldReact": true for: bank money credit/debit, UPI/GPay/PhonePe transfers, exam results, AND personal WhatsApp/friend messages (even in Manglish like "eda paisa ayachittund").
-        2. Understand Malayalam, Manglish, and English meaning: if the message matches any stored dialogue with "hasAudio": true, set "playDialogueId" to that exact "id".
-        3. Always write a short, witty, human-like 1-sentence Malayalam reaction in "replyMalayalam" (used as spoken voice reaction if no MP3 clip matches!).
-        4. Respond ONLY with compact JSON:
-           {"heardTranscript":"","replyMalayalam":"...","playDialogueId":null,"expectFollowUp":false,"shouldReact":true,"action":{"type":"none","value":""},"ttsStyle":"cheerful and friendly | sympathetic and warm | dramatic and teasing | calm"}
-    """.trimIndent()
+            SPECIFICITY-FIRST RUBRIC (CRITICAL):
+            1. Set "shouldReact": false ONLY for OTPs, spam, ads, marketing promos, or boring tracking alerts.
+               ALWAYS set "shouldReact": true for: bank credit/debit, UPI/GPay/PhonePe transfers, exam results, AND genuine personal/friend messages.
+            2. Analyze full meaning & emotional tone (Malayalam, Manglish, English):
+               - If a SPECIFIC dialogue (scope="specific") matches the exact event, ALWAYS choose it over a BROAD mood dialogue (scope="broad").
+               - If NO specific dialogue exists for that exact event, fall back to a matching BROAD mood dialogue (e.g. "money credited" -> "happy things" if no money dialogue exists).
+               - NEVER mismatch opposites (e.g. "exam passed" NEVER matches "exam failed"; "credited" NEVER matches "debited").
+            3. Always write a short, witty 1-sentence Malayalam reply in "replyMalayalam" matching the Active Voice Pack Persona (spoken aloud via streaming TTS if playDialogueId is null).
+            4. Respond ONLY with compact JSON:
+               {"heardTranscript":"","replyMalayalam":"...","playDialogueId":null,"expectFollowUp":false,"shouldReact":true,"action":{"type":"none","value":""},"ttsStyle":"cheerful and friendly | sympathetic and warm | dramatic and teasing | calm"}
+        """.trimIndent()
+    }
 
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
@@ -543,6 +566,7 @@ class GeminiBrainClient {
                 id = e.id,
                 title = e.title,
                 situations = e.situations,
+                scope = e.scope.ifBlank { "specific" },
                 hasAudio = hasAudioPredicate(e)
             )
         }

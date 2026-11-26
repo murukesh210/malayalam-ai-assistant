@@ -39,9 +39,10 @@ class EmbeddingMatcherEngine(
         rawQuery: String,
         appPackageHint: String? = null,
         requirePlayableAudio: Boolean = false,
+        overrideDialogues: List<DialogueEntry>? = null,
         topK: Int = 3
     ): List<MatchCandidate> {
-        val allDialogues = vaultRepository.dialogues.value
+        val allDialogues = overrideDialogues ?: vaultRepository.dialogues.value
         val dialogues = if (requirePlayableAudio) {
             allDialogues.filter { vaultRepository.hasPlayableAudio(it) }
         } else {
@@ -134,13 +135,16 @@ class EmbeddingMatcherEngine(
         val rawDTokens = tokenize(entry.compositeSearchDocument())
         if (rawQTokens.isEmpty() || rawDTokens.isEmpty()) return 0f
 
+        // STRICT POLARITY GUARD: never mismatch opposites (e.g. "exam passed" vs "exam failed", "credited" vs "debited")!
+        if (hasOppositePolarity(rawQTokens, rawDTokens)) {
+            return 0.02f
+        }
+
         val qExpanded = expandConcepts(rawQTokens)
         val dExpanded = expandConcepts(rawDTokens)
 
-        // 1. Exact + synonym token overlap
         val exactOverlap = qExpanded.intersect(dExpanded).size
 
-        // 2. Partial-word / stem prefix overlap (e.g., "fail" <-> "failed", "arrear" <-> "arrears")
         var stemMatches = 0
         for (qt in rawQTokens) {
             if (qt.length < 4) continue
@@ -151,15 +155,20 @@ class EmbeddingMatcherEngine(
             if (matched) stemMatches++
         }
 
-        // 3. Situation phrase substring check
         val qLower = query.lowercase().trim()
         val phraseHit = entry.situations.any { sit ->
             val s = sit.lowercase().trim()
             s.length >= 4 && (qLower.contains(s) || (qLower.length >= 5 && s.contains(qLower)))
         }
 
-        // STRICT NOISE GATE: if zero tokens, zero stems, and zero phrases matched, stay near 0!
-        if (exactOverlap == 0 && stemMatches == 0 && !phraseHit) {
+        // Broad mood fallback: positive/happy events match a broad "happy" dialogue if no specific dialogue exists
+        val isBroad = entry.scope.equals("broad", ignoreCase = true)
+        val broadMoodMatch = isBroad && (
+            (rawQTokens.any { it in POSITIVE_EVENT_CUES } && rawDTokens.any { it in POSITIVE_MOOD_CUES }) ||
+                (rawQTokens.any { it in NEGATIVE_EVENT_CUES } && rawDTokens.any { it in NEGATIVE_MOOD_CUES })
+            )
+
+        if (exactOverlap == 0 && stemMatches == 0 && !phraseHit && !broadMoodMatch) {
             return 0.04f
         }
 
@@ -167,11 +176,29 @@ class EmbeddingMatcherEngine(
         val directHitRatio = ((stemMatches.coerceAtLeast(exactOverlap.coerceAtMost(rawQTokens.size))).toFloat() / effectiveQuerySize)
             .coerceIn(0f, 1f)
         val conceptScore = (exactOverlap.toFloat() / qExpanded.size.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
-        val categoryHit = if (qExpanded.contains(entry.category.lowercase())) 0.24f else 0f
-        val phraseBonus = if (phraseHit) 0.30f else 0f
+        val categoryHit = if (qExpanded.contains(entry.category.lowercase())) 0.22f else 0f
+        val phraseBonus = if (phraseHit) 0.28f else 0f
+        // Specificity-First priority: specific dialogues outrank broad mood dialogues when both match!
+        val specificityAdjust = if (!isBroad && (exactOverlap > 0 || stemMatches > 0 || phraseHit)) 0.12f else if (broadMoodMatch) 0.26f else 0f
 
-        val score = (directHitRatio * 0.44f) + (conceptScore * 0.28f) + categoryHit + phraseBonus
+        val score = (directHitRatio * 0.40f) + (conceptScore * 0.24f) + categoryHit + phraseBonus + specificityAdjust
         return score.coerceIn(0.26f, 0.98f)
+    }
+
+    private fun hasOppositePolarity(qTokens: Set<String>, dTokens: Set<String>): Boolean {
+        val qPass = qTokens.any { it in PASS_WORDS }
+        val qFail = qTokens.any { it in FAIL_WORDS }
+        val dPass = dTokens.any { it in PASS_WORDS }
+        val dFail = dTokens.any { it in FAIL_WORDS }
+        if ((qPass && !qFail && dFail && !dPass) || (qFail && !qPass && dPass && !dFail)) return true
+
+        val qCredit = qTokens.any { it in CREDIT_WORDS }
+        val qDebit = qTokens.any { it in DEBIT_WORDS }
+        val dCredit = dTokens.any { it in CREDIT_WORDS }
+        val dDebit = dTokens.any { it in DEBIT_WORDS }
+        if ((qCredit && !qDebit && dDebit && !dCredit) || (qDebit && !qCredit && dCredit && !dDebit)) return true
+
+        return false
     }
 
     private fun stemWord(word: String): String {
@@ -208,6 +235,16 @@ class EmbeddingMatcherEngine(
 
     companion object {
         const val MIN_SAFE_THRESHOLD = 0.25f
+
+        private val PASS_WORDS = setOf("pass", "passed", "won", "win", "success", "congrats", "congratulations", "ജയിച്ചു", "വിജയം", "പാസ്")
+        private val FAIL_WORDS = setOf("fail", "failed", "failure", "arrear", "arrears", "supply", "suppli", "backlog", "potti", "തോറ്റു", "സപ്ലി")
+        private val CREDIT_WORDS = setOf("credit", "credited", "received", "deposited", "salary", "ayachittund", "vannu", "കയറി", "കിട്ടി")
+        private val DEBIT_WORDS = setOf("debit", "debited", "spent", "paid", "withdrawn", "deducted", "poyi", "കുറഞ്ഞു", "പോയി")
+
+        private val POSITIVE_EVENT_CUES = PASS_WORDS + CREDIT_WORDS + setOf("happy", "party", "poli", "promoted", "selected", "offer", "bonus")
+        private val POSITIVE_MOOD_CUES = setOf("happy", "good", "celebration", "joy", "excited", "win", "poli", "സന്തോഷം")
+        private val NEGATIVE_EVENT_CUES = FAIL_WORDS + DEBIT_WORDS + setOf("sad", "broke", "scold", "angry", "late", "lost", "rejected")
+        private val NEGATIVE_MOOD_CUES = setOf("sad", "bad", "upset", "crying", "tension", "സങ്കടം", "ദേഷ്യം")
 
         private val STOP_WORDS = setOf(
             "the", "and", "for", "you", "your", "are", "was", "have", "has", "with", "from",

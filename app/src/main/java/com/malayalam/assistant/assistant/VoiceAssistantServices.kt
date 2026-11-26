@@ -303,9 +303,12 @@ class AssistantVoiceInteractionSession(context: Context) :
 
             // 1. Primary: Google AI Studio Brain + Expressive Malayalam TTS when API key is configured
             val apiKey = graph.prefs.getDecryptedGeminiApiKey()
+            val packDialogues = graph.voicePackRepository.activeDialogues.value
+            val activePack = graph.voicePackRepository.getActivePackMeta()
+            val effectiveVoice = activePack?.ttsVoice?.takeIf { it.isNotBlank() } ?: settings.geminiVoiceName
+
             if (apiKey.isNotBlank()) {
-                val vaultEntries = graph.vaultRepository.dialogues.value
-                val summaries = com.malayalam.assistant.ai.GeminiBrainClient.toVaultSummaries(vaultEntries) {
+                val summaries = com.malayalam.assistant.ai.GeminiBrainClient.toVaultSummaries(packDialogues) {
                     graph.vaultRepository.hasPlayableAudio(it)
                 }
                 val ai = graph.geminiBrainClient.askWithTextOrAudio(
@@ -313,6 +316,7 @@ class AssistantVoiceInteractionSession(context: Context) :
                     userText = prompt,
                     screenContext = screenCtx,
                     vaultDialogues = summaries,
+                    packPersonaInstruction = activePack?.personaInstruction.orEmpty(),
                     preferMalayalam = ml
                 )
                 if (ai != null) {
@@ -329,7 +333,7 @@ class AssistantVoiceInteractionSession(context: Context) :
                     uiState.value = uiState.value.copy(isThinking = false, assistantResponse = replyText)
 
                     val matchedClip = ai.playDialogueId?.let { id ->
-                        vaultEntries.firstOrNull { it.id == id && graph.vaultRepository.hasPlayableAudio(it) }
+                        packDialogues.firstOrNull { it.id == id && graph.vaultRepository.hasPlayableAudio(it) }
                     }
                     val playedClip = matchedClip?.let { graph.audioPlayer.playEntry(it) } == true
                     if (!playedClip && settings.ttsVoiceRepliesEnabled) {
@@ -337,7 +341,7 @@ class AssistantVoiceInteractionSession(context: Context) :
                             text = replyText,
                             apiKey = apiKey,
                             ttsClient = graph.geminiTtsClient,
-                            voiceName = settings.geminiVoiceName,
+                            voiceName = effectiveVoice,
                             ttsStyle = ai.ttsStyle,
                             preferMalayalam = ml
                         )

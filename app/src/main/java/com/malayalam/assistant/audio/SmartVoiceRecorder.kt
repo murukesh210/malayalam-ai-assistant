@@ -19,12 +19,13 @@ data class WavRecordingResult(
 )
 
 /**
- * Fast Gemini-Style Voice Activity Detection (VAD) Recorder (`AudioRecord` `VOICE_RECOGNITION`):
- *  - Calibrates ambient noise floor during the first `350 ms`.
- *  - Waits up to `8000 ms` for speech (NEVER cuts off before you start talking!).
- *  - Auto-stops after **`850 ms` of natural silence** so replies feel instant!
- *  - Downsamples captured 16 kHz PCM to **8 kHz mono 16-bit WAV** (`50%` smaller upload payload
- *    with zero loss in Malayalam/Manglish accuracy).
+ * Gemini-Live Style Continuous Voice Activity Detection (VAD) Recorder (`AudioRecord` `VOICE_RECOGNITION`):
+ *  - In `continuousWaitMode = true`, NEVER times out while silent — stays quietly in `LISTENING`
+ *    and periodically recalibrates ambient `noiseFloor` every `1500 ms` of quiet so room noise never false-triggers.
+ *  - Requires `rms > max(noiseFloor * 2.3, 680.0)` sustained for `>= 180 ms` before triggering `onSpeechStarted()`.
+ *  - Auto-stops after **`850 ms`** of continuous silence once speech lasted `>= 350 ms` (or manual stop),
+ *    immediately releasing `AudioRecord` so the mic never hears its own TTS/movie clip!
+ *  - Encodes captured speech as compact **8 kHz mono 16-bit WAV** (`50%` smaller upload payload).
  */
 class SmartVoiceRecorder {
 
@@ -40,6 +41,8 @@ class SmartVoiceRecorder {
 
     @SuppressLint("MissingPermission")
     suspend fun recordWithVad(
+        continuousWaitMode: Boolean = true,
+        onSpeechStarted: () -> Unit = {},
         onRmsLevel: (Float) -> Unit
     ): WavRecordingResult = withContext(Dispatchers.IO) {
         stopRequested.set(false)
@@ -67,17 +70,23 @@ class SmartVoiceRecorder {
         val frameSamples = 320 // 20 ms at 16 kHz
         val shortBuf = ShortArray(frameSamples)
         val pcm8kOut = ByteArrayOutputStream(32 * 1024)
-        // 300 ms pre-roll (15 frames of 20 ms)
-        val preRollFrames = ArrayDeque<ByteArray>(16)
+        // 360 ms pre-roll (18 frames of 20 ms) so opening syllables are never clipped
+        val preRollFrames = ArrayDeque<ByteArray>(20)
 
         var speechDetected = false
-        var noiseFloorSum = 0.0
-        var noiseFloorCount = 0
+        var initialCalibrationSum = 0.0
+        var initialCalibrationCount = 0
         var noiseFloor = 300.0
+
+        var quietRecalSum = 0.0
+        var quietRecalCount = 0
+        var consecutiveLoudMs = 0L
+        var speechDurationMs = 0L
         var silenceAfterSpeechMs = 0L
 
         isRecordingFlag.set(true)
         val startMs = System.currentTimeMillis()
+        var speechStartMs = 0L
 
         try {
             recorder.startRecording()
@@ -86,51 +95,73 @@ class SmartVoiceRecorder {
                 val read = recorder.read(shortBuf, 0, frameSamples)
                 if (read <= 0) continue
 
-                val elapsedMs = System.currentTimeMillis() - startMs
+                val nowMs = System.currentTimeMillis()
+                val elapsedMs = nowMs - startMs
                 val rms = computeRms(shortBuf, read)
                 val normalizedWave = ((rms - 120.0) / 3600.0).toFloat().coerceIn(0.05f, 1.0f)
                 onRmsLevel(normalizedWave)
 
-                // Decimate 16 kHz -> 8 kHz mono (2x smaller upload for faster Gemini latency!)
                 val frame8kBytes = downsample16kTo8kLittleEndian(shortBuf, read)
 
+                // Phase 1: Initial 350 ms ambient calibration
                 if (elapsedMs <= CALIBRATION_MS) {
-                    noiseFloorSum += rms
-                    noiseFloorCount++
-                    noiseFloor = (noiseFloorSum / noiseFloorCount.coerceAtLeast(1))
+                    initialCalibrationSum += rms
+                    initialCalibrationCount++
+                    noiseFloor = (initialCalibrationSum / initialCalibrationCount.coerceAtLeast(1))
                     pushPreRoll(preRollFrames, frame8kBytes)
                     continue
                 }
 
-                val vadThreshold = maxOf(noiseFloor * 2.2, 650.0)
+                val vadThreshold = maxOf(noiseFloor * 2.3, 680.0)
 
                 if (!speechDetected) {
                     pushPreRoll(preRollFrames, frame8kBytes)
                     if (rms > vadThreshold) {
-                        speechDetected = true
-                        silenceAfterSpeechMs = 0L
-                        for (pre in preRollFrames) pcm8kOut.write(pre)
-                        preRollFrames.clear()
-                    } else if (elapsedMs >= WAIT_FOR_SPEECH_TIMEOUT_MS) {
-                        break
-                    }
-                } else {
-                    pcm8kOut.write(frame8kBytes)
-                    if (rms > vadThreshold * 0.78) {
-                        silenceAfterSpeechMs = 0L
+                        consecutiveLoudMs += FRAME_MS
+                        quietRecalSum = 0.0
+                        quietRecalCount = 0
+                        if (consecutiveLoudMs >= MIN_SPEECH_ONSET_MS) {
+                            speechDetected = true
+                            speechStartMs = nowMs
+                            speechDurationMs = consecutiveLoudMs
+                            silenceAfterSpeechMs = 0L
+                            for (pre in preRollFrames) pcm8kOut.write(pre)
+                            preRollFrames.clear()
+                            onSpeechStarted()
+                        }
                     } else {
-                        silenceAfterSpeechMs += FRAME_MS
-                        if (silenceAfterSpeechMs >= SILENCE_AUTO_STOP_MS) {
+                        consecutiveLoudMs = 0L
+                        // Periodically recalibrate ambient noise floor during long silence
+                        quietRecalSum += rms
+                        quietRecalCount++
+                        if (quietRecalCount >= QUIET_RECALIBRATION_FRAMES) {
+                            val windowAvg = quietRecalSum / quietRecalCount
+                            noiseFloor = (noiseFloor * 0.72 + windowAvg * 0.28).coerceIn(120.0, 2200.0)
+                            quietRecalSum = 0.0
+                            quietRecalCount = 0
+                        }
+                        if (!continuousWaitMode && elapsedMs >= SINGLE_TURN_WAIT_TIMEOUT_MS) {
                             break
                         }
                     }
-                    if (elapsedMs >= MAX_RECORDING_MS) {
+                } else {
+                    pcm8kOut.write(frame8kBytes)
+                    speechDurationMs += FRAME_MS
+                    if (rms > vadThreshold * 0.76) {
+                        silenceAfterSpeechMs = 0L
+                    } else {
+                        silenceAfterSpeechMs += FRAME_MS
+                        if (silenceAfterSpeechMs >= SILENCE_AUTO_STOP_MS && speechDurationMs >= MIN_SPEECH_DURATION_MS) {
+                            break
+                        }
+                    }
+                    if (nowMs - speechStartMs >= MAX_SPEECH_DURATION_MS) {
                         break
                     }
                 }
             }
         } catch (_: Exception) {
-            // Gracefully finalize whatever audio was captured
+            // Finalize cleanly
         } finally {
             isRecordingFlag.set(false)
             onRmsLevel(0f)
@@ -139,7 +170,7 @@ class SmartVoiceRecorder {
         }
 
         val rawPcm8k = pcm8kOut.toByteArray()
-        if (!speechDetected || rawPcm8k.size < 1600) {
+        if (!speechDetected || rawPcm8k.size < 2400) {
             WavRecordingResult(ByteArray(0), false)
         } else {
             WavRecordingResult(wrapPcm16AsWav(rawPcm8k, UPLOAD_SAMPLE_RATE, 1), true)
@@ -147,7 +178,7 @@ class SmartVoiceRecorder {
     }
 
     private fun pushPreRoll(queue: ArrayDeque<ByteArray>, frame: ByteArray) {
-        if (queue.size >= 15) queue.removeFirst()
+        if (queue.size >= 18) queue.removeFirst()
         queue.addLast(frame)
     }
 
@@ -160,9 +191,6 @@ class SmartVoiceRecorder {
         return sqrt(sumSq / count.coerceAtLeast(1))
     }
 
-    /**
-     * Averages adjacent 16 kHz sample pairs into 8 kHz 16-bit little-endian PCM bytes.
-     */
     private fun downsample16kTo8kLittleEndian(samples: ShortArray, count: Int): ByteArray {
         val outSamples = count / 2
         val out = ByteArray(outSamples * 2)
@@ -179,9 +207,12 @@ class SmartVoiceRecorder {
         const val UPLOAD_SAMPLE_RATE = 8_000
         private const val FRAME_MS = 20L
         private const val CALIBRATION_MS = 350L
-        private const val WAIT_FOR_SPEECH_TIMEOUT_MS = 8_000L
+        private const val MIN_SPEECH_ONSET_MS = 180L
+        private const val MIN_SPEECH_DURATION_MS = 350L
+        private const val QUIET_RECALIBRATION_FRAMES = 75 // 1500 ms
+        private const val SINGLE_TURN_WAIT_TIMEOUT_MS = 8_000L
         private const val SILENCE_AUTO_STOP_MS = 850L
-        private const val MAX_RECORDING_MS = 20_000L
+        private const val MAX_SPEECH_DURATION_MS = 20_000L
 
         fun wrapPcm16AsWav(pcmBytes: ByteArray, sampleRate: Int, channels: Int): ByteArray {
             val byteRate = sampleRate * channels * 2

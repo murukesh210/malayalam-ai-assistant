@@ -33,6 +33,7 @@ data class DialogueEntry(
     val category: String = SituationCategory.CUSTOM.id,
     val situations: List<String> = emptyList(),
     val recommendedApps: List<String> = emptyList(),
+    val scope: String = "specific", // "specific" | "broad"
     val durationMs: Long = 0L,
     val addedAtEpochMs: Long = System.currentTimeMillis()
 ) {

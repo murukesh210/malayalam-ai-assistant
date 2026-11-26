@@ -14,6 +14,7 @@ import com.malayalam.assistant.audio.MalayalamAudioListener
 import com.malayalam.assistant.data.AppDatabase
 import com.malayalam.assistant.data.AppPreferences
 import com.malayalam.assistant.data.SafVaultRepository
+import com.malayalam.assistant.data.VoicePackRepository
 import com.malayalam.assistant.service.AssistantKeepAliveService
 import com.malayalam.assistant.service.AudioOutputGuard
 import com.malayalam.assistant.service.GmailDirectWatcherService
@@ -30,6 +31,7 @@ class AppGraph(context: Context) {
     val prefs = AppPreferences(appContext)
     val db = AppDatabase.get(appContext)
     val vaultRepository = SafVaultRepository(appContext, prefs)
+    val voicePackRepository = VoicePackRepository(appContext, prefs, vaultRepository)
 
     val modelCoordinator = ModelCoordinator(appContext)
     val modelDownloadManager = ModelDownloadManager(appContext)
@@ -87,10 +89,9 @@ class AssistantApplication : Application() {
         graph = AppGraph(this)
         appScope.launch {
             graph.vaultRepository.initializeFromDisk()
+            graph.voicePackRepository.initialize()
             val settings = graph.prefs.snapshot()
-            if (settings.alwaysOnKeepAliveEnabled &&
-                (AudioOutputGuard.isNotificationAccessGranted(this@AssistantApplication) || settings.smsAutoReactEnabled)
-            ) {
+            if (settings.backgroundModeActive) {
                 AssistantKeepAliveService.syncServiceState(this@AssistantApplication, true)
             }
             if (settings.gmailWatcherEnabled && settings.gmailAddress.isNotBlank()) {

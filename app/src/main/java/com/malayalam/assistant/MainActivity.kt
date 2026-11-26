@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DrawerValue
@@ -61,6 +62,7 @@ import com.malayalam.assistant.ui.tabs.DialogueVaultTab
 import com.malayalam.assistant.ui.tabs.MinimalVoiceHomeScreen
 import com.malayalam.assistant.ui.tabs.ModelsAndSettingsTab
 import com.malayalam.assistant.ui.tabs.RecentActivityScreen
+import com.malayalam.assistant.ui.tabs.VoicePacksScreen
 import com.malayalam.assistant.ui.theme.GeminiBlue
 import com.malayalam.assistant.ui.theme.GeminiCard
 import com.malayalam.assistant.ui.theme.GeminiSurface
@@ -71,6 +73,7 @@ import kotlinx.coroutines.launch
 
 private enum class AppDestination {
     HOME_ORB,
+    VOICE_PACKS,
     DIALOGUE_VAULT,
     TEST_SIMULATOR,
     RECENT_ACTIVITY,
@@ -94,6 +97,7 @@ class MainActivity : ComponentActivity() {
 
                 var pendingModelImportTarget by remember { mutableStateOf<ManagedModelId?>(null) }
                 var pendingAttachDialogueId by remember { mutableStateOf<String?>(null) }
+                var pendingExportPackId by remember { mutableStateOf<String?>(null) }
 
                 var isFallbackMicListening by remember { mutableStateOf(false) }
                 var notifEnabled by remember {
@@ -109,6 +113,10 @@ class MainActivity : ComponentActivity() {
                         if (event == Lifecycle.Event.ON_RESUME) {
                             notifEnabled = AudioOutputGuard.isNotificationAccessGranted(this@MainActivity)
                             smsPermGranted = hasSmsPermissions()
+                        } else if (event == Lifecycle.Event.ON_STOP) {
+                            stopFallbackMic()
+                            isFallbackMicListening = false
+                            viewModel.onAppBackgrounded()
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
@@ -124,14 +132,16 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val heroText by viewModel.heroGreetingOrReply.collectAsState()
-                val isListeningVad by viewModel.isListeningVad.collectAsState()
-                val isThinking by viewModel.isThinking.collectAsState()
-                val micRmsLevel by viewModel.micRmsLevel.collectAsState()
+                val voiceSessionState by viewModel.voiceSessionState.collectAsState()
+                val continuousMicRms by viewModel.continuousMicRms.collectAsState()
+                val isThinkingTyped by viewModel.isThinkingTyped.collectAsState()
                 val ramStatus by viewModel.ramStatus.collectAsState()
                 val playbackState by viewModel.playbackState.collectAsState()
                 val chatHistory by viewModel.chatHistory.collectAsState()
                 val todos by viewModel.todos.collectAsState()
                 val settings by viewModel.settings.collectAsState()
+                val packs by viewModel.packs.collectAsState()
+                val activePackId by viewModel.activePackId.collectAsState()
                 val dialogues by viewModel.dialogues.collectAsState()
                 val playableAudioMap by viewModel.playableAudioMap.collectAsState()
                 val pendingReviews by viewModel.pendingReviews.collectAsState()
@@ -139,6 +149,9 @@ class MainActivity : ComponentActivity() {
                 val simulatorResults by viewModel.simulatorResults.collectAsState()
                 val simulatorAiNote by viewModel.simulatorAiNote.collectAsState()
                 val bannerMessage by viewModel.vaultBannerMessage.collectAsState()
+                val packBannerMessage by viewModel.packBannerMessage.collectAsState()
+                val importedPackNeedingAiTagId by viewModel.importedPackNeedingAiTagId.collectAsState()
+                val isBatchAutoTagging by viewModel.isBatchAutoTagging.collectAsState()
                 val editorDraft by viewModel.editorDraft.collectAsState()
                 val geminiKeyTestResult by viewModel.geminiKeyTestResult.collectAsState()
                 val lastApiDebugStatus by viewModel.lastApiDebugStatus.collectAsState()
@@ -146,6 +159,10 @@ class MainActivity : ComponentActivity() {
                 val whatsappSimStatus by viewModel.whatsappSimStatus.collectAsState()
                 val gmailTestResult by viewModel.gmailTestResult.collectAsState()
                 val modelStates by viewModel.modelStates.collectAsState()
+
+                val activePackName = remember(packs, activePackId) {
+                    viewModel.activePackDisplayName()
+                }
 
                 val runtimePermissionsLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
@@ -166,7 +183,7 @@ class MainActivity : ComponentActivity() {
                 ) { granted ->
                     if (granted) {
                         if (settings.hasGeminiApiKey) {
-                            viewModel.toggleSmartVadRecording()
+                            viewModel.onLiveOrbTapped()
                         } else {
                             toggleFallbackSpeechRecognizer(
                                 locale = settings.speechLocale,
@@ -195,12 +212,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val addAudioLauncher = rememberLauncherForActivityResult(
-                    ActivityResultContracts.OpenDocument()
-                ) { uri ->
-                    if (uri != null) viewModel.addSingleClipFromPicker(uri)
-                }
-
                 val pickEditorAudioLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument()
                 ) { uri ->
@@ -213,6 +224,21 @@ class MainActivity : ComponentActivity() {
                     val targetId = pendingAttachDialogueId
                     if (uri != null && targetId != null) {
                         viewModel.attachAudioToExistingDialogue(targetId, uri)
+                    }
+                }
+
+                val importPackZipLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    if (uri != null) viewModel.importVoicePackFromZip(uri)
+                }
+
+                val exportPackZipLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("application/zip")
+                ) { destUri ->
+                    val targetPackId = pendingExportPackId
+                    if (destUri != null && targetPackId != null) {
+                        viewModel.exportVoicePackToZip(targetPackId, destUri)
                     }
                 }
 
@@ -251,7 +277,7 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.padding(horizontal = 20.dp)
                             )
                             Text(
-                                text = "${dialogues.size} dialogues • ${if (settings.hasGeminiApiKey) "Gemini Voice Ready" else "Offline Mode"}",
+                                text = "🎬 $activePackName • ${dialogues.size} clips",
                                 color = GeminiTextSecondary,
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
@@ -261,13 +287,25 @@ class MainActivity : ComponentActivity() {
                             Spacer(Modifier.height(10.dp))
 
                             NavigationDrawerItem(
-                                label = { Text("Home (Voice Orb)") },
+                                label = { Text("Home (Live Orb)") },
                                 icon = { Icon(Icons.Default.Home, contentDescription = null) },
                                 selected = destination == AppDestination.HOME_ORB,
                                 colors = drawerItemColors,
                                 modifier = Modifier.padding(horizontal = 12.dp),
                                 onClick = {
                                     destination = AppDestination.HOME_ORB
+                                    uiScope.launch { drawerState.close() }
+                                }
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Voice Packs (Actor Packs)") },
+                                icon = { Icon(Icons.Default.Movie, contentDescription = null) },
+                                selected = destination == AppDestination.VOICE_PACKS,
+                                colors = drawerItemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                onClick = {
+                                    destination = AppDestination.VOICE_PACKS
                                     uiScope.launch { drawerState.close() }
                                 }
                             )
@@ -341,18 +379,17 @@ class MainActivity : ComponentActivity() {
                     when (destination) {
                         AppDestination.HOME_ORB -> MinimalVoiceHomeScreen(
                             heroText = heroText,
+                            activePackName = activePackName,
+                            voiceSessionState = voiceSessionState,
                             playbackState = playbackState,
                             chatHistory = chatHistory,
                             speechLocale = settings.speechLocale,
-                            isMicListening = isListeningVad || isFallbackMicListening,
-                            isThinking = isThinking,
-                            micRmsLevel = micRmsLevel,
+                            isFallbackMicListening = isFallbackMicListening,
+                            isThinking = isThinkingTyped,
+                            micRmsLevel = continuousMicRms,
+                            backgroundModeActive = settings.backgroundModeActive,
+                            missingBgPermissionHint = !notifEnabled && !smsPermGranted,
                             onOrbClick = {
-                                // 1. Tapping orb while audio/TTS is playing stops playback immediately
-                                if (playbackState.isPlaying) {
-                                    viewModel.stopAudio()
-                                    return@MinimalVoiceHomeScreen
-                                }
                                 val hasMicPerm = ContextCompat.checkSelfPermission(
                                     this@MainActivity,
                                     Manifest.permission.RECORD_AUDIO
@@ -361,28 +398,40 @@ class MainActivity : ComponentActivity() {
                                     micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                     return@MinimalVoiceHomeScreen
                                 }
-                                // 2. Primary: Real VAD AudioRecord -> Gemini Brain when API key is configured
                                 if (settings.hasGeminiApiKey) {
-                                    viewModel.toggleSmartVadRecording()
+                                    viewModel.onLiveOrbTapped()
                                 } else {
-                                    // Offline fallback when no API key is entered yet
-                                    toggleFallbackSpeechRecognizer(
-                                        locale = settings.speechLocale,
-                                        currentlyListening = isFallbackMicListening,
-                                        onListeningState = { active ->
-                                            isFallbackMicListening = active
-                                            if (!active) viewModel.updateExternalMicRms(0f)
-                                        },
-                                        onRmsLevel = viewModel::updateExternalMicRms,
-                                        onPartialResult = viewModel::updateLivePartialSpeech,
-                                        onFinalResult = { spoken ->
-                                            if (spoken.isNotBlank()) viewModel.sendChatOrAction(spoken)
-                                            else viewModel.resetGreetingToNamaskaram()
-                                        }
-                                    )
+                                    if (playbackState.isPlaying) {
+                                        viewModel.stopAudio()
+                                    } else {
+                                        toggleFallbackSpeechRecognizer(
+                                            locale = settings.speechLocale,
+                                            currentlyListening = isFallbackMicListening,
+                                            onListeningState = { active ->
+                                                isFallbackMicListening = active
+                                                if (!active) viewModel.updateExternalMicRms(0f)
+                                            },
+                                            onRmsLevel = viewModel::updateExternalMicRms,
+                                            onPartialResult = viewModel::updateLivePartialSpeech,
+                                            onFinalResult = { spoken ->
+                                                if (spoken.isNotBlank()) viewModel.sendChatOrAction(spoken)
+                                                else viewModel.resetGreetingToNamaskaram()
+                                            }
+                                        )
+                                    }
                                 }
                             },
+                            onStopLiveSession = viewModel::stopContinuousLiveSession,
                             onStopAudio = viewModel::stopAudio,
+                            onToggleBackgroundMode = {
+                                if (!settings.backgroundModeActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    runtimePermissionsLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                                }
+                                viewModel.toggleBackgroundMode()
+                            },
+                            onMinimizeToBackground = { moveTaskToBack(true) },
+                            onOpenBgPermissionsSetup = { destination = AppDestination.MODELS_SETTINGS },
+                            onOpenVoicePacks = { destination = AppDestination.VOICE_PACKS },
                             onOpenDrawer = { uiScope.launch { drawerState.open() } },
                             onOpenSettings = { destination = AppDestination.MODELS_SETTINGS },
                             onSendTypedPrompt = { prompt ->
@@ -392,13 +441,33 @@ class MainActivity : ComponentActivity() {
                             onToggleLocale = viewModel::toggleSpeechLocale
                         )
 
+                        AppDestination.VOICE_PACKS -> VoicePacksScreen(
+                            packs = packs,
+                            activePackId = activePackId,
+                            packBannerMessage = packBannerMessage,
+                            importedPackNeedingAiTagId = importedPackNeedingAiTagId,
+                            isBatchAutoTagging = isBatchAutoTagging,
+                            onBack = { destination = AppDestination.HOME_ORB },
+                            onSelectPack = viewModel::selectVoicePack,
+                            onImportPackZip = { importPackZipLauncher.launch(arrayOf("*/*")) },
+                            onCreatePack = viewModel::createVoicePack,
+                            onExportPack = { pack ->
+                                pendingExportPackId = pack.packId
+                                val safeFile = pack.packName.replace(Regex("[^a-zA-Z0-9_-]"), "_") + ".mlpack.zip"
+                                exportPackZipLauncher.launch(safeFile)
+                            },
+                            onDeletePack = viewModel::deleteVoicePack,
+                            onBatchAutoTagImportedPack = viewModel::batchAutoTagPackWithAi,
+                            onOpenPackDialogues = { packId ->
+                                viewModel.selectVoicePack(packId)
+                                destination = AppDestination.DIALOGUE_VAULT
+                            }
+                        )
+
                         AppDestination.DIALOGUE_VAULT,
                         AppDestination.TEST_SIMULATOR -> DialogueVaultTab(
-                            titleHeader = if (destination == AppDestination.TEST_SIMULATOR) {
-                                "Test Simulator"
-                            } else {
-                                "My Dialogues"
-                            },
+                            titleHeader = if (destination == AppDestination.TEST_SIMULATOR) "Test Simulator" else "My Dialogues",
+                            activePackName = activePackName,
                             focusSimulatorFirst = destination == AppDestination.TEST_SIMULATOR,
                             safTreeUri = settings.safTreeUri,
                             dialogues = dialogues,
@@ -412,6 +481,7 @@ class MainActivity : ComponentActivity() {
                             bannerMessage = bannerMessage,
                             editorDraft = editorDraft,
                             onBack = { destination = AppDestination.HOME_ORB },
+                            onOpenVoicePacks = { destination = AppDestination.VOICE_PACKS },
                             onOpenAddDialogueSheet = viewModel::openAddDialogueSheet,
                             onOpenEditDialogueSheet = viewModel::openEditDialogueSheet,
                             onCloseEditorSheet = viewModel::closeDialogueEditor,

@@ -293,23 +293,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var playedClipTitle: String? = null
         if (matchedDialogue != null) {
             val shouldSpeakAfter = curSettings.speakAfterDialogueClip && curSettings.ttsVoiceRepliesEnabled && replyText.isNotBlank()
+            val clipFinishedCallback: (() -> Unit)? = if (shouldSpeakAfter) {
+                {
+                    viewModelScope.launch {
+                        graph.audioPlayer.speakNaturalReply(
+                            text = replyText,
+                            apiKey = apiKey,
+                            ttsClient = graph.geminiTtsClient,
+                            voiceName = curSettings.geminiVoiceName,
+                            ttsStyle = ai.ttsStyle,
+                            preferMalayalam = curSettings.isMalayalamMode,
+                            onFinished = followUpCallback
+                        )
+                    }
+                    Unit
+                }
+            } else {
+                followUpCallback
+            }
             val played = graph.audioPlayer.playEntry(
                 entry = matchedDialogue,
-                onFinished = if (shouldSpeakAfter) {
-                    {
-                        viewModelScope.launch {
-                            graph.audioPlayer.speakNaturalReply(
-                                text = replyText,
-                                apiKey = apiKey,
-                                ttsClient = graph.geminiTtsClient,
-                                voiceName = curSettings.geminiVoiceName,
-                                ttsStyle = ai.ttsStyle,
-                                preferMalayalam = curSettings.isMalayalamMode,
-                                onFinished = followUpCallback
-                            )
-                        }
-                    }
-                } else followUpCallback
+                onFinished = clipFinishedCallback
             )
             if (played) playedClipTitle = matchedDialogue.title
         }

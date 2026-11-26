@@ -32,8 +32,9 @@ data class UserSettings(
     // Google AI Studio (Gemini API) Brain + Expressive TTS
     val geminiApiKeyEncrypted: String = "",
     val geminiVoiceName: String = "Kore",
-    // Automatic Bank & Message SMS Auto-Reaction
+    // Automatic Bank & Message SMS Auto-Reaction + Always-On Keep-Alive
     val smsAutoReactEnabled: Boolean = false,
+    val alwaysOnKeepAliveEnabled: Boolean = true,
     // Direct SSL IMAP Gmail Watcher (Android Go / 2 GB RAM)
     val gmailWatcherEnabled: Boolean = false,
     val gmailAddress: String = "",
@@ -51,11 +52,17 @@ data class UserSettings(
         val AVAILABLE_GEMINI_VOICES = listOf("Kore", "Puck", "Aoede", "Zephyr", "Fenrir", "Charon")
 
         val DEFAULT_WATCHED_PACKAGES = setOf(
-            "com.google.android.gm",
             "com.whatsapp",
+            "com.whatsapp.w4b",
             "com.google.android.apps.messaging",
+            "com.android.mms",
+            "com.samsung.android.messaging",
+            "com.google.android.gm",
             "org.telegram.messenger",
-            "com.instagram.android"
+            "com.instagram.android",
+            "com.google.android.apps.nbu.paisa.user",
+            "com.phonepe.app",
+            "net.one97.paytm"
         )
     }
 }
@@ -79,6 +86,7 @@ class AppPreferences(private val context: Context) {
         val GEMINI_API_KEY_ENC = stringPreferencesKey("gemini_api_key_encrypted")
         val GEMINI_VOICE_NAME = stringPreferencesKey("gemini_voice_name")
         val SMS_AUTO_REACT = booleanPreferencesKey("sms_auto_react_enabled")
+        val ALWAYS_ON_KEEP_ALIVE = booleanPreferencesKey("always_on_keep_alive_enabled")
         val GMAIL_WATCHER_ENABLED = booleanPreferencesKey("gmail_watcher_enabled")
         val GMAIL_ADDRESS = stringPreferencesKey("gmail_address")
         val GMAIL_ENC_APP_PASSWORD = stringPreferencesKey("gmail_enc_app_password")
@@ -107,6 +115,7 @@ class AppPreferences(private val context: Context) {
             geminiApiKeyEncrypted = prefs[Keys.GEMINI_API_KEY_ENC] ?: "",
             geminiVoiceName = prefs[Keys.GEMINI_VOICE_NAME] ?: "Kore",
             smsAutoReactEnabled = prefs[Keys.SMS_AUTO_REACT] ?: false,
+            alwaysOnKeepAliveEnabled = prefs[Keys.ALWAYS_ON_KEEP_ALIVE] ?: true,
             gmailWatcherEnabled = prefs[Keys.GMAIL_WATCHER_ENABLED] ?: false,
             gmailAddress = prefs[Keys.GMAIL_ADDRESS] ?: "",
             gmailEncryptedAppPassword = prefs[Keys.GMAIL_ENC_APP_PASSWORD] ?: "",
@@ -134,6 +143,10 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setSmsAutoReactEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.SMS_AUTO_REACT] = enabled }
+    }
+
+    suspend fun setAlwaysOnKeepAliveEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.ALWAYS_ON_KEEP_ALIVE] = enabled }
     }
 
     suspend fun setSpeakAfterDialogueClip(enabled: Boolean) {

@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,29 +28,34 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AudioFile
-import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -68,6 +75,7 @@ import com.malayalam.assistant.data.DialogueEntry
 import com.malayalam.assistant.data.MatchCandidate
 import com.malayalam.assistant.data.PendingReviewEntity
 import com.malayalam.assistant.data.SituationCategory
+import com.malayalam.assistant.ui.DialogueEditorDraft
 import com.malayalam.assistant.ui.theme.GeminiAmber
 import com.malayalam.assistant.ui.theme.GeminiBlue
 import com.malayalam.assistant.ui.theme.GeminiCard
@@ -80,10 +88,10 @@ import com.malayalam.assistant.ui.theme.GeminiViolet
 import com.malayalam.assistant.ui.theme.matteCharcoalGradient
 import com.malayalam.assistant.worker.PipelineProgressUi
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun DialogueVaultTab(
-    titleHeader: String = "Dialogue Vault",
+    titleHeader: String = "My Dialogues",
     focusSimulatorFirst: Boolean = false,
     safTreeUri: String,
     dialogues: List<DialogueEntry>,
@@ -92,26 +100,34 @@ fun DialogueVaultTab(
     pipelineProgress: PipelineProgressUi,
     playbackState: PlaybackState,
     simulatorResults: List<MatchCandidate>,
+    simulatorAiNote: String,
     matchThreshold: Float,
     bannerMessage: String,
+    editorDraft: DialogueEditorDraft?,
     onBack: () -> Unit,
+    onOpenAddDialogueSheet: () -> Unit,
+    onOpenEditDialogueSheet: (DialogueEntry) -> Unit,
+    onCloseEditorSheet: () -> Unit,
+    onUpdateEditorDraft: ((DialogueEditorDraft) -> DialogueEditorDraft) -> Unit,
+    onPickAudioForEditor: () -> Unit,
+    onAutoListenEditorWithAi: () -> Unit,
+    onSaveEditorDraft: () -> Unit,
     onPickSafFolder: () -> Unit,
-    onAddDialogueFile: () -> Unit,
     onAttachMp3ToDialogue: (DialogueEntry) -> Unit,
     onScanSafFolder: () -> Unit,
     onPlayDialogue: (DialogueEntry) -> Unit,
-    onPlayPendingUri: (PendingReviewEntity) -> Unit,
+    onPlayRawUri: (String, String, String, String) -> Unit,
     onStopAudio: () -> Unit,
     onConfirmPending: (PendingReviewEntity, String, String, List<String>) -> Unit,
     onAutoAcceptAllPending: () -> Unit,
     onDismissPending: (String) -> Unit,
-    onSaveEditedDialogue: (DialogueEntry, String, String, String) -> Unit,
     onDeleteDialogue: (String) -> Unit,
     onRunSimulator: (String) -> Unit
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var simulatorQuery by rememberSaveable { mutableStateOf("You failed in your exam") }
-    var editingEntry by remember { mutableStateOf<DialogueEntry?>(null) }
+    var showSimulatorSection by rememberSaveable(focusSimulatorFirst) { mutableStateOf(focusSimulatorFirst) }
+    var showSafFolderSection by rememberSaveable { mutableStateOf(false) }
 
     val filteredDialogues = remember(dialogues, searchQuery) {
         if (searchQuery.isBlank()) dialogues
@@ -126,225 +142,177 @@ fun DialogueVaultTab(
         }
     }
 
-    val groupedByCategory = remember(filteredDialogues) {
-        filteredDialogues.groupBy { SituationCategory.fromId(it.category) }
-    }
-
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(matteCharcoalGradient())
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
-            }
-            Text(
-                text = titleHeader,
-                color = Color.White,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 18.sp
-            )
-        }
-
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (focusSimulatorFirst) {
-                item {
-                    SimulatorCard(
-                        simulatorQuery = simulatorQuery,
-                        onQueryChange = { simulatorQuery = it },
-                        simulatorResults = simulatorResults,
-                        playableAudioMap = playableAudioMap,
-                        matchThreshold = matchThreshold,
-                        onRunSimulator = onRunSimulator,
-                        onPlayDialogue = onPlayDialogue,
-                        onAttachMp3 = onAttachMp3ToDialogue
-                    )
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Top Bar + Prominent "+ Add My Dialogue" CTA
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
-            }
-
-            // 1. SAF Vault Folder & Quick Audio Add Buttons
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(GeminiSurface)
-                        .padding(14.dp)
+                Text(
+                    text = titleHeader,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 18.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Button(
+                    onClick = onOpenAddDialogueSheet,
+                    colors = ButtonDefaults.buttonColors(containerColor = GeminiBlue)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, tint = GeminiBlue)
-                        Spacer(Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (safTreeUri.isBlank()) "Audio Folder (Optional SAF Backup)" else "SAF Folder Connected (.nomedia)",
-                                color = GeminiTextPrimary,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp
-                            )
-                            Text(
-                                text = if (safTreeUri.isBlank()) {
-                                    "You can pick MP3s directly on any card below, or choose a folder so clips survive reinstalls."
-                                } else {
-                                    "Syncing dialogues.json (${dialogues.size} dialogues)"
-                                },
-                                color = GeminiTextSecondary,
-                                fontSize = 12.sp
-                            )
-                        }
-                        OutlinedButton(onClick = onPickSafFolder) {
-                            Text(if (safTreeUri.isBlank()) "Folder" else "Change", fontSize = 12.sp)
-                        }
-                    }
-
-                    Spacer(Modifier.height(10.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = onAddDialogueFile,
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = GeminiBlue)
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF071324))
-                            Spacer(Modifier.width(4.dp))
-                            Text("+ Add Dialogue", fontSize = 12.sp, color = Color(0xFF071324), fontWeight = FontWeight.SemiBold)
-                        }
-                        OutlinedButton(
-                            onClick = onScanSafFolder,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Scan Folder", fontSize = 12.sp)
-                        }
-                    }
-
-                    if (bannerMessage.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(text = bannerMessage, color = GeminiMint, fontSize = 12.sp)
-                    }
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF071324))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add Dialogue", color = Color(0xFF071324), fontWeight = FontWeight.SemiBold, fontSize = 12.sp, maxLines = 1, softWrap = false)
                 }
             }
 
-            // 2. Live Sequential WorkManager Pipeline Banner
-            if (pipelineProgress.isRunning) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (bannerMessage.isNotBlank()) {
+                    item {
+                        Text(text = bannerMessage, color = GeminiMint, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
+                    }
+                }
+
+                // Compact Collapsible Tools Row (Test Simulator + Audio Folder)
                 item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(GeminiCard)
-                            .border(1.dp, GeminiViolet.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-                            .padding(12.dp)
-                    ) {
-                        Text(
-                            text = "Auto-Organizing Clip (Step ${pipelineProgress.stepIndex}/3)",
-                            color = GeminiViolet,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 12.sp
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(text = pipelineProgress.stageLabel, color = GeminiTextPrimary, fontSize = 13.sp)
-                        Spacer(Modifier.height(6.dp))
-                        LinearProgressIndicator(
-                            progress = { (pipelineProgress.stepIndex / 3f).coerceIn(0.15f, 1f) },
-                            modifier = Modifier.fillMaxWidth(),
-                            color = GeminiViolet,
-                            trackColor = GeminiSurface
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CollapsibleHeaderCard(
+                            title = "Test Simulator",
+                            subtitle = "Test 'You failed in your exam' or 'eda paisa ayachittund'",
+                            expanded = showSimulatorSection,
+                            onToggle = { showSimulatorSection = !showSimulatorSection }
+                        ) {
+                            SimulatorCardContent(
+                                simulatorQuery = simulatorQuery,
+                                onQueryChange = { simulatorQuery = it },
+                                simulatorResults = simulatorResults,
+                                simulatorAiNote = simulatorAiNote,
+                                playableAudioMap = playableAudioMap,
+                                matchThreshold = matchThreshold,
+                                onRunSimulator = onRunSimulator,
+                                onPlayDialogue = onPlayDialogue,
+                                onAttachMp3 = onAttachMp3ToDialogue
+                            )
+                        }
+
+                        CollapsibleHeaderCard(
+                            title = "Audio Backup Folder (Optional SAF)",
+                            subtitle = if (safTreeUri.isBlank()) "Optional folder sync for reinstalls" else "SAF folder linked (.nomedia)",
+                            expanded = showSafFolderSection,
+                            onToggle = { showSafFolderSection = !showSafFolderSection }
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = onPickSafFolder, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (safTreeUri.isBlank()) "Pick Folder" else "Change Folder", fontSize = 12.sp, maxLines = 1, softWrap = false)
+                                }
+                                OutlinedButton(onClick = onScanSafFolder, modifier = Modifier.weight(1f)) {
+                                    Text("Scan Folder", fontSize = 12.sp, maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Sequential Pipeline Banner (if scanning folder)
+                if (pipelineProgress.isRunning) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(GeminiCard)
+                                .padding(12.dp)
+                        ) {
+                            Text(text = pipelineProgress.stageLabel, color = GeminiViolet, fontSize = 13.sp)
+                            Spacer(Modifier.height(6.dp))
+                            LinearProgressIndicator(
+                                progress = { (pipelineProgress.stepIndex / 3f).coerceIn(0.15f, 1f) },
+                                modifier = Modifier.fillMaxWidth(),
+                                color = GeminiViolet
+                            )
+                        }
+                    }
+                }
+
+                // Pending Review Cards (if any)
+                if (pendingReviews.isNotEmpty()) {
+                    item {
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Review & Confirm (${pendingReviews.size})",
+                                color = GeminiAmber,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = onAutoAcceptAllPending) {
+                                Icon(Icons.Default.DoneAll, contentDescription = null, tint = GeminiMint, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Accept All", color = GeminiMint, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    items(pendingReviews, key = { it.id }) { item ->
+                        ReviewAndConfirmCard(
+                            item = item,
+                            isPlaying = playbackState.isPlaying && playbackState.activeDialogueId == item.id,
+                            onPlayToggle = {
+                                if (playbackState.isPlaying && playbackState.activeDialogueId == item.id) onStopAudio()
+                                else onPlayRawUri(item.safUriString, item.id, item.title, item.heardText)
+                            },
+                            onConfirm = { title, cat, chips -> onConfirmPending(item, title, cat, chips) },
+                            onDismiss = { onDismissPending(item.id) }
                         )
                     }
                 }
-            }
 
-            // 3. Review & Confirm Cards
-            if (pendingReviews.isNotEmpty()) {
+                // My Dialogues Section Immediately Visible!
                 item {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Review & Confirm (${pendingReviews.size})",
-                            color = GeminiAmber,
-                            fontWeight = FontWeight.Bold,
+                            text = "My Dialogues (${filteredDialogues.size})",
+                            color = GeminiViolet,
+                            fontWeight = FontWeight.SemiBold,
                             fontSize = 15.sp,
                             modifier = Modifier.weight(1f)
                         )
-                        TextButton(onClick = onAutoAcceptAllPending) {
-                            Icon(Icons.Default.DoneAll, contentDescription = null, tint = GeminiMint, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Auto-Accept All", color = GeminiMint, fontSize = 12.sp)
-                        }
                     }
                 }
 
-                items(pendingReviews, key = { it.id }) { item ->
-                    ReviewAndConfirmCard(
-                        item = item,
-                        isPlaying = playbackState.isPlaying && playbackState.activeDialogueId == item.id,
-                        onPlayToggle = {
-                            if (playbackState.isPlaying && playbackState.activeDialogueId == item.id) onStopAudio()
-                            else onPlayPendingUri(item)
-                        },
-                        onConfirm = { title, cat, chips -> onConfirmPending(item, title, cat, chips) },
-                        onDismiss = { onDismissPending(item.id) }
-                    )
-                }
-            }
-
-            if (!focusSimulatorFirst) {
                 item {
-                    SimulatorCard(
-                        simulatorQuery = simulatorQuery,
-                        onQueryChange = { simulatorQuery = it },
-                        simulatorResults = simulatorResults,
-                        playableAudioMap = playableAudioMap,
-                        matchThreshold = matchThreshold,
-                        onRunSimulator = onRunSimulator,
-                        onPlayDialogue = onPlayDialogue,
-                        onAttachMp3 = onAttachMp3ToDialogue
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        placeholder = { Text("Search name, Malayalam, or Manglish trigger...", fontSize = 13.sp) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp)
                     )
                 }
-            }
 
-            // 5. Search Bar & Grouped Dialogue Cards
-            item {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    placeholder = { Text("Search Malayalam, Manglish, or English situations...", fontSize = 13.sp) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp)
-                )
-            }
-
-            groupedByCategory.forEach { (category, entries) ->
-                item(key = "header_${category.id}") {
-                    Text(
-                        text = "${category.displayLabel} (${entries.size})",
-                        color = GeminiViolet,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-                items(entries, key = { it.id }) { entry ->
+                items(filteredDialogues, key = { it.id }) { entry ->
                     val isPlayingThis = playbackState.isPlaying && playbackState.activeDialogueId == entry.id
                     val isAudioLinked = playableAudioMap[entry.id] == true
                     DialogueItemCard(
@@ -357,59 +325,255 @@ fun DialogueVaultTab(
                             else onAttachMp3ToDialogue(entry)
                         },
                         onAttachMp3 = { onAttachMp3ToDialogue(entry) },
-                        onEdit = { editingEntry = entry },
+                        onEdit = { onOpenEditDialogueSheet(entry) },
                         onDelete = { onDeleteDialogue(entry.id) }
                     )
                 }
-            }
 
-            item { Spacer(Modifier.height(16.dp)) }
+                item { Spacer(Modifier.height(84.dp)) }
+            }
         }
+
+        // Prominent "+ Add My Dialogue" FloatingActionButton
+        ExtendedFloatingActionButton(
+            onClick = onOpenAddDialogueSheet,
+            containerColor = GeminiBlue,
+            contentColor = Color(0xFF071324),
+            icon = { Icon(Icons.Default.Add, contentDescription = null) },
+            text = { Text("Add My Dialogue", fontWeight = FontWeight.SemiBold) },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(18.dp)
+        )
     }
 
-    editingEntry?.let { target ->
-        EditDialogueModal(
-            entry = target,
-            onDismiss = { editingEntry = null },
-            onSave = { newTitle, newCat, newSituationsCsv ->
-                onSaveEditedDialogue(target, newTitle, newCat, newSituationsCsv)
-                editingEntry = null
-            }
-        )
+    // Super-Clean "Add / Edit Dialogue" Bottom Sheet with ✨ AI Auto-Listen!
+    if (editorDraft != null) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = onCloseEditorSheet,
+            sheetState = sheetState,
+            containerColor = GeminiSurface
+        ) {
+            AddEditDialogueSheetContent(
+                draft = editorDraft,
+                isPreviewPlaying = playbackState.isPlaying && playbackState.activeDialogueId == "editor_preview",
+                onUpdate = onUpdateEditorDraft,
+                onPickAudio = onPickAudioForEditor,
+                onPreviewToggle = {
+                    if (playbackState.isPlaying && playbackState.activeDialogueId == "editor_preview") {
+                        onStopAudio()
+                    } else if (editorDraft.audioUriString.isNotBlank()) {
+                        onPlayRawUri(editorDraft.audioUriString, "editor_preview", editorDraft.title.ifBlank { editorDraft.fileName }, editorDraft.heardText)
+                    }
+                },
+                onAutoListenWithAi = onAutoListenEditorWithAi,
+                onSave = onSaveEditorDraft
+            )
+        }
     }
 }
 
 @Composable
-private fun SimulatorCard(
+private fun AddEditDialogueSheetContent(
+    draft: DialogueEditorDraft,
+    isPreviewPlaying: Boolean,
+    onUpdate: ((DialogueEditorDraft) -> DialogueEditorDraft) -> Unit,
+    onPickAudio: () -> Unit,
+    onPreviewToggle: () -> Unit,
+    onAutoListenWithAi: () -> Unit,
+    onSave: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .imePadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = if (draft.existingId == null) "Add My Dialogue" else "Edit Dialogue",
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 18.sp
+        )
+
+        // 1. Pick Audio Clip + Instant Play Preview
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(onClick = onPickAudio, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.AudioFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = if (draft.fileName.isBlank()) "1. Pick Audio (.mp3/.wav)" else "Audio: ${draft.fileName.take(18)}",
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+            if (draft.audioUriString.isNotBlank()) {
+                Button(
+                    onClick = onPreviewToggle,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isPreviewPlaying) GeminiCoral else GeminiMint
+                    )
+                ) {
+                    Icon(
+                        imageVector = if (isPreviewPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                        contentDescription = "Preview",
+                        tint = Color.Black,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (isPreviewPlaying) "Stop" else "Play", color = Color.Black, fontSize = 12.sp, maxLines = 1, softWrap = false)
+                }
+            }
+        }
+
+        // 2. "✨ Auto-Listen & Fill with AI"
+        Button(
+            onClick = onAutoListenWithAi,
+            enabled = draft.audioUriString.isNotBlank() && !draft.isAutoTagging,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = GeminiViolet)
+        ) {
+            Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = Color(0xFF160829), modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = if (draft.isAutoTagging) "Listening with Gemini..." else "✨ Auto-Listen & Fill with AI",
+                color = Color(0xFF160829),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+        }
+
+        if (draft.isAutoTagging) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = GeminiViolet)
+        }
+        if (draft.statusNote.isNotBlank()) {
+            Text(text = draft.statusNote, color = GeminiMint, fontSize = 11.sp)
+        }
+
+        // 3. Dialogue Name + Situations + Trigger Apps
+        OutlinedTextField(
+            value = draft.title,
+            onValueChange = { v -> onUpdate { it.copy(title = v) } },
+            label = { Text("Dialogue Name (e.g. Njan veendum kodeeshwaran)", fontSize = 12.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = draft.situationsCsv,
+            onValueChange = { v -> onUpdate { it.copy(situationsCsv = v) } },
+            label = { Text("When to Play (Manglish / Malayalam / English)", fontSize = 12.sp) },
+            placeholder = { Text("eda paisa ayachittund, money received, salary credited, GPay credit", fontSize = 12.sp) },
+            minLines = 2,
+            maxLines = 4,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Apps:", color = GeminiTextSecondary, fontSize = 12.sp)
+            listOf("ALL" to "All", "WHATSAPP" to "WhatsApp", "SMS" to "SMS", "GMAIL" to "Gmail").forEach { (key, label) ->
+                val selected = key in draft.triggerApps
+                FilterChip(
+                    selected = selected,
+                    onClick = {
+                        onUpdate { cur ->
+                            val next = cur.triggerApps.toMutableSet()
+                            if (key == "ALL") {
+                                next.clear(); next.add("ALL")
+                            } else {
+                                next.remove("ALL")
+                                if (selected) next.remove(key) else next.add(key)
+                                if (next.isEmpty()) next.add("ALL")
+                            }
+                            cur.copy(triggerApps = next)
+                        }
+                    },
+                    label = { Text(label, fontSize = 12.sp) }
+                )
+            }
+        }
+
+        // 4. Save Dialogue Button
+        Button(
+            onClick = onSave,
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = GeminiBlue)
+        ) {
+            Icon(Icons.Default.Check, contentDescription = null, tint = Color(0xFF071324))
+            Spacer(Modifier.width(6.dp))
+            Text("Save Dialogue", color = Color(0xFF071324), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(10.dp))
+    }
+}
+
+@Composable
+private fun CollapsibleHeaderCard(
+    title: String,
+    subtitle: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(GeminiSurface)
+            .padding(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = title, color = GeminiBlue, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(text = subtitle, color = GeminiTextSecondary, fontSize = 11.sp)
+            }
+            Icon(
+                imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = "Toggle",
+                tint = GeminiTextSecondary
+            )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(10.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SimulatorCardContent(
     simulatorQuery: String,
     onQueryChange: (String) -> Unit,
     simulatorResults: List<MatchCandidate>,
+    simulatorAiNote: String,
     playableAudioMap: Map<String, Boolean>,
     matchThreshold: Float,
     onRunSimulator: (String) -> Unit,
     onPlayDialogue: (DialogueEntry) -> Unit,
     onAttachMp3: (DialogueEntry) -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(GeminiSurface)
-            .padding(14.dp)
-    ) {
-        Text(
-            text = "Test Simulator (Email / Notification Matcher)",
-            color = GeminiBlue,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 14.sp
-        )
-        Spacer(Modifier.height(6.dp))
+    Column(modifier = Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = simulatorQuery,
                 onValueChange = onQueryChange,
                 modifier = Modifier.weight(1f),
-                label = { Text("Type email subject or message", fontSize = 12.sp) },
+                label = { Text("Type message / email", fontSize = 12.sp) },
                 singleLine = true
             )
             Spacer(Modifier.width(8.dp))
@@ -417,12 +581,17 @@ private fun SimulatorCard(
                 onClick = { onRunSimulator(simulatorQuery) },
                 colors = ButtonDefaults.buttonColors(containerColor = GeminiViolet)
             ) {
-                Text("Test", color = Color(0xFF160829), fontWeight = FontWeight.SemiBold)
+                Text("Test", color = Color(0xFF160829), fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
             }
         }
 
+        if (simulatorAiNote.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Text(text = simulatorAiNote, color = GeminiMint, fontSize = 12.sp)
+        }
+
         if (simulatorResults.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
             simulatorResults.forEachIndexed { idx, candidate ->
                 val passes = candidate.score >= matchThreshold.coerceAtLeast(0.25f)
                 val linked = playableAudioMap[candidate.entry.id] == true
@@ -443,12 +612,7 @@ private fun SimulatorCard(
                     )
                     Spacer(Modifier.width(8.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = candidate.entry.title,
-                            color = GeminiTextPrimary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+                        Text(text = candidate.entry.title, color = GeminiTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                         Text(
                             text = if (linked) "✅ Audio linked" else "⚠️ Tap to pick MP3",
                             color = if (linked) GeminiMint else GeminiAmber,
@@ -513,16 +677,10 @@ private fun DialogueItemCard(
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = entry.title,
-                    color = GeminiTextPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp
-                )
-                // Clear Audio Link Status Pill (1-tap to pick/replace MP3 directly!)
+                Text(text = entry.title, color = GeminiTextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 Text(
                     text = if (isAudioLinked) {
-                        "✅ Audio linked (${entry.fileName.ifBlank { "clip" }}) • Tap to change"
+                        "✅ Audio linked (${entry.fileName.ifBlank { "clip" }}) • Replace"
                     } else {
                         "⚠️ Tap to pick MP3 / WAV"
                     },
@@ -543,15 +701,6 @@ private fun DialogueItemCard(
             IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = GeminiCoral, modifier = Modifier.size(18.dp))
             }
-        }
-
-        if (entry.heardText.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = entry.heardText,
-                color = GeminiTextPrimary.copy(alpha = 0.9f),
-                fontSize = 12.sp
-            )
         }
 
         if (entry.situations.isNotEmpty()) {
@@ -592,25 +741,23 @@ private fun ReviewAndConfirmCard(
             addAll(item.situationsCsv.split(",").map { it.trim() }.filter { it.isNotBlank() })
         }
     }
-    var newChipText by remember(item.id) { mutableStateOf("") }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(GeminiCard)
-            .border(1.dp, GeminiAmber.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
-            .padding(14.dp)
+            .border(1.dp, GeminiAmber.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+            .padding(12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onPlayToggle, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onPlayToggle, modifier = Modifier.size(34.dp)) {
                 Icon(
                     imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-                    contentDescription = "Preview Clip",
+                    contentDescription = "Preview",
                     tint = if (isPlaying) GeminiCoral else GeminiMint
                 )
             }
-            Spacer(Modifier.width(6.dp))
             OutlinedTextField(
                 value = title,
                 onValueChange = { title = it },
@@ -622,118 +769,23 @@ private fun ReviewAndConfirmCard(
                 Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = GeminiTextSecondary)
             }
         }
-
         Spacer(Modifier.height(6.dp))
-        Text(text = "Heard: ${item.heardText}", color = GeminiTextPrimary, fontSize = 13.sp)
-
-        Spacer(Modifier.height(8.dp))
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            SituationCategory.entries.forEach { cat ->
-                FilterChip(
-                    selected = category == cat.id,
-                    onClick = { category = cat.id },
-                    label = { Text(cat.id, fontSize = 11.sp) }
-                )
-            }
-        }
-
-        Spacer(Modifier.height(6.dp))
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             chips.forEach { phrase ->
                 AssistChip(
                     onClick = { chips.remove(phrase) },
                     label = { Text("$phrase ✕", fontSize = 11.sp) },
-                    colors = AssistChipDefaults.assistChipColors(
-                        containerColor = GeminiSurface,
-                        labelColor = GeminiTextPrimary
-                    )
+                    colors = AssistChipDefaults.assistChipColors(containerColor = GeminiSurface, labelColor = GeminiTextPrimary)
                 )
             }
         }
-
         Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = newChipText,
-                onValueChange = { newChipText = it },
-                placeholder = { Text("Add trigger phrase...", fontSize = 12.sp) },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(
-                onClick = {
-                    if (newChipText.isNotBlank()) {
-                        chips.add(newChipText.trim())
-                        newChipText = ""
-                    }
-                }
-            ) {
-                Text("+ Chip")
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
         Button(
             onClick = { onConfirm(title, category, chips.toList()) },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = GeminiMint)
         ) {
-            Icon(Icons.Default.Check, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Confirm & Index Dialogue", color = Color.Black, fontWeight = FontWeight.SemiBold)
+            Text("Confirm & Save", color = Color.Black, fontWeight = FontWeight.SemiBold)
         }
     }
-}
-
-@Composable
-private fun EditDialogueModal(
-    entry: DialogueEntry,
-    onDismiss: () -> Unit,
-    onSave: (String, String, String) -> Unit
-) {
-    var title by remember { mutableStateOf(entry.title) }
-    var category by remember { mutableStateOf(entry.category) }
-    var situationsCsv by remember { mutableStateOf(entry.situations.joinToString(", ")) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Edit Dialogue Situations") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    label = { Text("Title") },
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = category,
-                    onValueChange = { category = it },
-                    label = { Text("Category (exam_fail, money, alarm...)") },
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = situationsCsv,
-                    onValueChange = { situationsCsv = it },
-                    label = { Text("Trigger Situations (comma-separated)") }
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(title, category, situationsCsv) }) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
 }

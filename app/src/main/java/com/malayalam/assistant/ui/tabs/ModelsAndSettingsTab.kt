@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -55,6 +56,7 @@ import com.malayalam.assistant.ai.ManagedModelId
 import com.malayalam.assistant.ai.ModelInstallState
 import com.malayalam.assistant.ai.RamStatus
 import com.malayalam.assistant.data.UserSettings
+import com.malayalam.assistant.service.LiveNotificationLogEntry
 import com.malayalam.assistant.ui.theme.GeminiAmber
 import com.malayalam.assistant.ui.theme.GeminiBlue
 import com.malayalam.assistant.ui.theme.GeminiCard
@@ -67,11 +69,17 @@ import com.malayalam.assistant.ui.theme.GeminiViolet
 import com.malayalam.assistant.ui.theme.matteCharcoalGradient
 
 private val WATCHABLE_APPS = listOf(
-    "com.google.android.gm" to "Gmail",
     "com.whatsapp" to "WhatsApp",
+    "com.whatsapp.w4b" to "WhatsApp Business",
     "com.google.android.apps.messaging" to "Google Messages",
+    "com.samsung.android.messaging" to "Samsung Messages",
+    "com.android.mms" to "System SMS/MMS",
+    "com.google.android.gm" to "Gmail",
     "org.telegram.messenger" to "Telegram",
-    "com.instagram.android" to "Instagram"
+    "com.instagram.android" to "Instagram",
+    "com.google.android.apps.nbu.paisa.user" to "Google Pay (GPay)",
+    "com.phonepe.app" to "PhonePe",
+    "net.one97.paytm" to "Paytm"
 )
 
 @Composable
@@ -84,12 +92,17 @@ fun ModelsAndSettingsTab(
     isNotificationAccessEnabled: Boolean,
     isSmsPermissionGranted: Boolean,
     geminiKeyTestResult: String,
+    lastApiDebugStatus: String,
+    liveMonitorLogs: List<LiveNotificationLogEntry>,
+    whatsappSimStatus: String,
     gmailTestResult: String,
     onBack: () -> Unit,
     onSaveGeminiApiKey: (String) -> Unit,
     onTestGeminiApiKey: (String) -> Unit,
     onSelectGeminiVoice: (String) -> Unit,
     onSetSpeakAfterClip: (Boolean) -> Unit,
+    onToggleAlwaysOnKeepAlive: (Boolean) -> Unit,
+    onSimulateWhatsAppMessage: (String) -> Unit,
     onToggleSmsAutoReact: (Boolean) -> Unit,
     onToggleLanguage: () -> Unit,
     onSetTtsReplies: (Boolean) -> Unit,
@@ -114,6 +127,7 @@ fun ModelsAndSettingsTab(
 ) {
     var apiKeyInput by rememberSaveable { mutableStateOf("") }
     var showApiKey by rememberSaveable { mutableStateOf(false) }
+    var simWhatsappInput by rememberSaveable { mutableStateOf("eda paisa ayachittund") }
     var gmailInput by rememberSaveable(settings.gmailAddress) { mutableStateOf(settings.gmailAddress) }
     var gmailPassInput by rememberSaveable { mutableStateOf("") }
     var tokenInput by rememberSaveable(settings.hfAuthToken) { mutableStateOf(settings.hfAuthToken) }
@@ -151,7 +165,7 @@ fun ModelsAndSettingsTab(
                 .padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. GOOGLE AI STUDIO API KEY + EXPRESSIVE MALAYALAM VOICE PICKER (0 MB RAM!)
+            // 1. GOOGLE AI STUDIO API KEY + STREAMING VOICE PICKER
             item {
                 Column(
                     modifier = Modifier
@@ -178,7 +192,7 @@ fun ModelsAndSettingsTab(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Get Free Key at aistudio.google.com • Powers human-like Malayalam voice & AI brain with 0 MB phone RAM.",
+                        text = "Get Free Key at aistudio.google.com • Streaming SSE voice + minimal-thinking AI (0 MB RAM).",
                         color = GeminiTextSecondary,
                         fontSize = 11.sp
                     )
@@ -218,19 +232,26 @@ fun ModelsAndSettingsTab(
                             },
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Save Key", fontSize = 12.sp)
+                            Text("Save Key", fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                         Button(
                             onClick = { onTestGeminiApiKey(apiKeyInput) },
                             modifier = Modifier.weight(1.2f),
                             colors = ButtonDefaults.buttonColors(containerColor = GeminiBlue)
                         ) {
-                            Text("Test Key", color = Color(0xFF071324), fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                            Text("Test Key", color = Color(0xFF071324), fontWeight = FontWeight.SemiBold, fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                     }
 
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "API Debug: $lastApiDebugStatus",
+                        color = GeminiTextSecondary,
+                        fontSize = 11.sp
+                    )
+
                     if (geminiKeyTestResult.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(4.dp))
                         Text(
                             text = geminiKeyTestResult,
                             color = if (geminiKeyTestResult.startsWith("❌")) GeminiCoral else GeminiMint,
@@ -238,9 +259,9 @@ fun ModelsAndSettingsTab(
                         )
                     }
 
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(10.dp))
                     Text(
-                        text = "Malayalam TTS Voice (${settings.geminiVoiceName}):",
+                        text = "Streaming Malayalam Voice (${settings.geminiVoiceName}):",
                         color = GeminiTextPrimary,
                         fontWeight = FontWeight.Medium,
                         fontSize = 13.sp
@@ -261,37 +282,116 @@ fun ModelsAndSettingsTab(
 
                     SettingToggleRow(
                         title = "Speak Malayalam Reply After Movie Clip",
-                        subtitle = "Off by default: movie clip punchline plays immediately; TTS speaks when no clip matches",
+                        subtitle = "Off by default: movie clip plays immediately; streaming TTS speaks when no clip matches",
                         checked = settings.speakAfterDialogueClip,
                         onCheckedChange = onSetSpeakAfterClip
                     )
                 }
             }
 
-            // 2. AUTOMATIC BANK SMS (CREDIT / DEBIT) & MESSAGE AUTO-REACTION
+            // 2. ALWAYS-ON BACKGROUND WHATSAPP, SMS & LIVE NOTIFICATION MONITOR
             item {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(18.dp))
                         .background(GeminiSurface)
-                        .border(1.dp, GeminiViolet.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
+                        .border(1.dp, GeminiViolet.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
                         .padding(14.dp)
                 ) {
+                    Text(
+                        text = "Always-On WhatsApp, SMS & Notification Monitor",
+                        color = GeminiViolet,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp
+                    )
+
+                    SettingToggleRow(
+                        title = "Always-On Background Message Reactions",
+                        subtitle = "Runs a lightweight START_STICKY service so reactions still fire when app is swiped closed",
+                        checked = settings.alwaysOnKeepAliveEnabled,
+                        onCheckedChange = onToggleAlwaysOnKeepAlive
+                    )
+
                     SettingToggleRow(
                         title = "Auto-React to Bank & Message SMS",
                         subtitle = if (isSmsPermissionGranted) {
-                            "SMS Permission Granted ✅ • Reacts to bank credit/debit & personal SMS (skips OTPs)"
+                            "SMS Permission Granted ✅ • Reacts to bank credit/debit & personal SMS"
                         } else {
-                            "Tap ON to grant RECEIVE_SMS permission for instant bank credit/debit movie clips"
+                            "Tap ON to grant RECEIVE_SMS permission for instant bank credit/debit clips"
                         },
                         checked = settings.smsAutoReactEnabled && isSmsPermissionGranted,
                         onCheckedChange = onToggleSmsAutoReact
                     )
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Simulate WhatsApp Message (1-Tap Pipeline Test):",
+                        color = GeminiTextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = simWhatsappInput,
+                            onValueChange = { simWhatsappInput = it },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = { onSimulateWhatsAppMessage(simWhatsappInput) },
+                            colors = ButtonDefaults.buttonColors(containerColor = GeminiViolet)
+                        ) {
+                            Text("Simulate", color = Color(0xFF160829), fontWeight = FontWeight.SemiBold, fontSize = 12.sp, maxLines = 1, softWrap = false)
+                        }
+                    }
+
+                    if (whatsappSimStatus.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(text = whatsappSimStatus, color = GeminiMint, fontSize = 12.sp)
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Live Notification Monitor (Last 5 Messages):",
+                        color = GeminiBlue,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    if (liveMonitorLogs.isEmpty()) {
+                        Text(
+                            text = "No messages intercepted yet — tap 'Simulate' above or send a WhatsApp/SMS!",
+                            color = GeminiTextSecondary,
+                            fontSize = 11.sp
+                        )
+                    } else {
+                        liveMonitorLogs.forEach { log ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(GeminiCard)
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    text = "[${log.timeLabel}] ${log.sourceApp} • ${log.sender}",
+                                    color = GeminiBlue,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(text = log.messagePreview, color = GeminiTextPrimary, fontSize = 12.sp)
+                                Text(text = log.actionTaken, color = GeminiMint, fontSize = 11.sp)
+                            }
+                        }
+                    }
                 }
             }
 
-            // 3. Language (ML / EN), Voice TTS & Default Assistant
+            // 3. Language & Default Assistant
             item {
                 Column(
                     modifier = Modifier
@@ -321,8 +421,8 @@ fun ModelsAndSettingsTab(
                     }
 
                     SettingToggleRow(
-                        title = "Speak Replies Aloud (Gemini Voice / Offline TTS)",
-                        subtitle = "Uses Gemini natural voice when API key is set, Android TTS offline",
+                        title = "Speak Replies Aloud (Streaming Gemini / Offline TTS)",
+                        subtitle = "Uses streaming Gemini voice when API key is set, Android TTS offline",
                         checked = settings.ttsVoiceRepliesEnabled,
                         onCheckedChange = onSetTtsReplies
                     )
@@ -362,7 +462,7 @@ fun ModelsAndSettingsTab(
                                 fontSize = 15.sp
                             )
                             Text(
-                                text = "Raw SSL IMAP (imap.gmail.com:993) polling UNSEEN mail every 20s • Tracks UID so emails never repeat.",
+                                text = "Raw SSL IMAP (imap.gmail.com:993) polling UNSEEN mail every 20s • Tracks UID.",
                                 color = GeminiTextSecondary,
                                 fontSize = 11.sp
                             )
@@ -394,7 +494,7 @@ fun ModelsAndSettingsTab(
                         label = {
                             Text(
                                 text = if (settings.gmailEncryptedAppPassword.isNotBlank()) {
-                                    "16-char Google App Password (Saved ✅ — type to replace)"
+                                    "16-char App Password (Saved ✅)"
                                 } else {
                                     "16-char Google App Password"
                                 },
@@ -415,19 +515,14 @@ fun ModelsAndSettingsTab(
                             },
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Save Login", fontSize = 12.sp)
+                            Text("Save", fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                         Button(
                             onClick = { onTestGmailConnection(gmailInput, gmailPassInput) },
-                            modifier = Modifier.weight(1.4f),
+                            modifier = Modifier.weight(1.5f),
                             colors = ButtonDefaults.buttonColors(containerColor = GeminiMint)
                         ) {
-                            Text(
-                                text = "Test Gmail & Latest Mail",
-                                color = Color(0xFF062016),
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp
-                            )
+                            Text("Test Gmail & Latest", color = Color(0xFF062016), fontWeight = FontWeight.SemiBold, fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                     }
 
@@ -444,7 +539,7 @@ fun ModelsAndSettingsTab(
                 }
             }
 
-            // 5. Notification Listener + Audio Guards
+            // 5. Notification Listener & Watched Apps
             item {
                 Column(
                     modifier = Modifier
@@ -455,7 +550,7 @@ fun ModelsAndSettingsTab(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "App Notification Reactions",
+                            text = "App Notification Access & Watched Apps",
                             color = GeminiBlue,
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 15.sp,
@@ -472,15 +567,14 @@ fun ModelsAndSettingsTab(
                     if (isAndroidGoDevice) {
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "⚠️ Android (Go edition) blocks Notification Access at the OS level. Use 'Auto-React to Bank & Message SMS' and 'Gmail Direct Watcher' above!",
+                            text = "⚠️ Android Go blocks Notification Access. Use SMS Auto-React & Gmail Direct Watcher above!",
                             color = GeminiAmber,
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp
+                            fontSize = 12.sp
                         )
                     } else {
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Android 13+ Sideloaded APK Tip: If Notification Access is restricted, tap 'Open App Info (⋮)' → 'Allow restricted settings'.",
+                            text = "Android 13+ Sideloaded APK: Tap 'Open App Info (⋮)' → 'Allow restricted settings', then enable Notification Access.",
                             color = GeminiTextSecondary,
                             fontSize = 11.sp
                         )
@@ -493,19 +587,19 @@ fun ModelsAndSettingsTab(
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = GeminiCard)
                         ) {
-                            Text("Notification Access", color = GeminiTextPrimary, fontSize = 12.sp)
+                            Text("Notification Access", color = GeminiTextPrimary, fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                         OutlinedButton(
                             onClick = onOpenAppInfoForRestrictedSettings,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Open App Info (⋮)", fontSize = 12.sp)
+                            Text("App Info (⋮)", fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                     }
 
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(10.dp))
                     Text(
-                        text = "Offline Match Threshold: ${String.format("%.2f", settings.matchThreshold)} (60s anti-repeat cooldown)",
+                        text = "Offline Match Threshold: ${String.format("%.2f", settings.matchThreshold)}",
                         color = GeminiTextPrimary,
                         fontSize = 13.sp
                     )
@@ -517,7 +611,7 @@ fun ModelsAndSettingsTab(
 
                     SettingToggleRow(
                         title = "Headphones / Bluetooth Only",
-                        subtitle = "Play background reactions only on earphones or Bluetooth audio",
+                        subtitle = "Play background reactions only on earphones or Bluetooth",
                         checked = settings.headphonesOrBluetoothOnly,
                         onCheckedChange = onSetHeadphonesOnly
                     )
@@ -576,18 +670,14 @@ fun ModelsAndSettingsTab(
 
                     SettingToggleRow(
                         title = "Ultra-Light Mode (2 GB RAM Safe)",
-                        subtitle = if (isDevice2GbClass) {
-                            "Auto-enabled for < 2.5 GB RAM — uses 0 MB local AI RAM"
-                        } else {
-                            "Runs commands & dialogue matching with 0 MB AI overhead"
-                        },
+                        subtitle = if (isDevice2GbClass) "Auto-enabled for < 2.5 GB RAM — 0 MB local AI RAM" else "0 MB AI overhead",
                         checked = settings.ultraLight2GbMode,
                         onCheckedChange = onSetUltraLight2GbMode
                     )
 
                     SettingToggleRow(
                         title = "4 GB Low-RAM Safe Mode",
-                        subtitle = "Forces CPU XNNPACK (4 threads) & One-Model-at-a-Time 45s auto-unload",
+                        subtitle = "CPU XNNPACK (4 threads) + One-Model-at-a-Time 45s auto-unload",
                         checked = settings.lowRamSafeMode,
                         onCheckedChange = onSetLowRamSafeMode
                     )
@@ -611,7 +701,7 @@ fun ModelsAndSettingsTab(
                         )
                         Spacer(Modifier.width(8.dp))
                         OutlinedButton(onClick = { onSaveHfToken(tokenInput) }) {
-                            Text("Save", fontSize = 12.sp)
+                            Text("Save", fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -643,9 +733,7 @@ fun ModelsAndSettingsTab(
             onDismissRequest = { confirmHeavyModelWarning = null },
             title = { Text("Needs 4 GB+ RAM") },
             text = {
-                Text(
-                    text = "${heavyModel.title} requires ~${heavyModel.estRamMb} MB peak RAM. On a 2 GB RAM phone, use your Google AI Studio Free API Key above (0 MB phone RAM) instead! Download anyway?"
-                )
+                Text("${heavyModel.title} requires ~${heavyModel.estRamMb} MB peak RAM. On 2 GB phones, use your free Google AI Studio API Key above (0 MB RAM) instead! Download anyway?")
             },
             confirmButton = {
                 TextButton(
@@ -654,14 +742,10 @@ fun ModelsAndSettingsTab(
                         confirmHeavyModelWarning = null
                         onDownloadModel(m)
                     }
-                ) {
-                    Text("Download Anyway", color = GeminiCoral)
-                }
+                ) { Text("Download Anyway", color = GeminiCoral) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmHeavyModelWarning = null }) {
-                    Text("Keep Ultra-Light (Recommended)")
-                }
+                TextButton(onClick = { confirmHeavyModelWarning = null }) { Text("Keep Ultra-Light") }
             }
         )
     }
@@ -685,25 +769,10 @@ private fun ModelManagerCard(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = model.title,
-                    color = GeminiTextPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp
-                )
+                Text(text = model.title, color = GeminiTextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 Text(text = model.subtitle, color = GeminiTextSecondary, fontSize = 12.sp)
                 if (needs4GbWarning) {
-                    Text(
-                        text = "⚠️ Needs 4 GB+ RAM (Use Google AI Studio Free Key instead)",
-                        color = GeminiAmber,
-                        fontSize = 11.sp
-                    )
-                } else if (model == ManagedModelId.EMBEDDING_GEMMA_270M) {
-                    Text(
-                        text = "✓ Optional lightweight offline semantic upgrade (~165 MB)",
-                        color = GeminiMint,
-                        fontSize = 11.sp
-                    )
+                    Text(text = "⚠️ Needs 4 GB+ RAM", color = GeminiAmber, fontSize = 11.sp)
                 }
             }
             Text(
@@ -730,10 +799,14 @@ private fun ModelManagerCard(
         }
 
         Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Button(
                 onClick = onDownload,
                 enabled = !state.isDownloading,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (needs4GbWarning) GeminiCard else GeminiBlue
                 )
@@ -741,15 +814,30 @@ private fun ModelManagerCard(
                 Text(
                     text = if (state.isInstalled) "Re-Download" else "Download",
                     color = if (needs4GbWarning) GeminiAmber else Color(0xFF071324),
-                    fontSize = 12.sp
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
-            OutlinedButton(onClick = onImportLocal, enabled = !state.isDownloading) {
-                Text("Import File", fontSize = 12.sp)
+            OutlinedButton(
+                onClick = onImportLocal,
+                enabled = !state.isDownloading,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text("Import", fontSize = 12.sp, maxLines = 1, softWrap = false)
             }
             if (state.isInstalled || state.diskBytes > 0L) {
-                TextButton(onClick = onDelete) {
-                    Text("Delete", color = GeminiCoral, fontSize = 12.sp)
+                TextButton(
+                    onClick = onDelete,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = "Delete",
+                        color = GeminiCoral,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }

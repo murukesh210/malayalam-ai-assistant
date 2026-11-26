@@ -317,7 +317,13 @@ class AssistantVoiceInteractionSession(context: Context) :
                 )
                 if (ai != null) {
                     if (ai.action.type.isNotBlank() && !ai.action.type.equals("none", ignoreCase = true)) {
-                        graph.functionRouter.executeGeminiAction(ai.action.type, ai.action.value)
+                        graph.functionRouter.executeGeminiAction(
+                            type = ai.action.type,
+                            value = ai.action.value,
+                            hour = ai.action.hour,
+                            minute = ai.action.minute,
+                            label = ai.action.label
+                        )
                     }
                     val replyText = ai.replyMalayalam.ifBlank { if (ml) "ശരി!" else "Done!" }
                     uiState.value = uiState.value.copy(isThinking = false, assistantResponse = replyText)

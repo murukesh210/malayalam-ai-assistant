@@ -2,13 +2,17 @@ package com.malayalam.assistant.ai
 
 import android.util.Base64
 import com.malayalam.assistant.data.DialogueEntry
+import com.malayalam.assistant.data.GemmaClassificationJson
+import com.malayalam.assistant.data.SituationCategory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -20,11 +24,17 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Serializable
 data class GeminiActionSpec(
     val type: String = "none", // none | set_alarm | open_app | dial_call | add_todo
+    val hour: Int? = null,
+    val minute: Int? = null,
+    val label: String = "",
     val value: String = ""
 )
 
@@ -33,9 +43,15 @@ data class GeminiBrainResponse(
     val heardTranscript: String = "",
     val replyMalayalam: String = "",
     val playDialogueId: String? = null,
+    val expectFollowUp: Boolean = false,
+    val shouldReact: Boolean = true,
     val action: GeminiActionSpec = GeminiActionSpec(),
-    val ttsStyle: String = "cheerful and friendly",
-    val skipReaction: Boolean = false
+    val ttsStyle: String = "cheerful and friendly"
+)
+
+data class ConversationHistoryItem(
+    val isUser: Boolean,
+    val text: String
 )
 
 data class VaultDialogueSummary(
@@ -46,11 +62,12 @@ data class VaultDialogueSummary(
 )
 
 /**
- * Google AI Studio (Gemini API) Brain Client (`0 MB` phone RAM):
- *  - Primary: `gemini-3.5-flash-lite` -> automatic fallback to `gemini-3.8-flash` / `gemini-2.5-flash`.
- *  - Accepts BOTH text prompts AND raw 16 kHz WAV audio (`inlineData` `audio/wav`) so Gemini hears
- *    natural Malayalam, Manglish, and English directly without broken on-device `SpeechRecognizer`.
- *  - Forces structured JSON output (`responseMimeType: "application/json"`).
+ * Low-Latency Google AI Studio Brain Client (`0 MB` phone RAM):
+ *  - Uses `SharedGeminiHttp` HTTP/2 keep-alive connection pool.
+ *  - Sets `thinkingConfig: { thinkingLevel: "minimal" }` + `maxOutputTokens: 220` for ~0.6-1.0s replies.
+ *  - Passes last 6 conversation turns + current local time (`HH:mm`, day of week) for multi-turn alarms.
+ *  - Retries once cleanly on transient socket timeout & strips markdown fences before JSON parsing.
+ *  - Logs exact HTTP status / error codes to `lastDebugStatus` for Settings diagnostics.
  */
 class GeminiBrainClient {
 
@@ -59,23 +76,15 @@ class GeminiBrainClient {
         isLenient = true
     }
 
-    private val defaultHttp = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .build()
-
-    private val fastReactionHttp = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(6, TimeUnit.SECONDS)
-        .writeTimeout(5, TimeUnit.SECONDS)
-        .build()
+    private val _lastDebugStatus = MutableStateFlow("Ready")
+    val lastDebugStatus: StateFlow<String> = _lastDebugStatus.asStateFlow()
 
     suspend fun askWithTextOrAudio(
         apiKey: String,
         userText: String? = null,
         wavAudioBytes: ByteArray? = null,
         screenContext: String? = null,
+        recentTurns: List<ConversationHistoryItem> = emptyList(),
         vaultDialogues: List<VaultDialogueSummary>,
         preferMalayalam: Boolean = true
     ): GeminiBrainResponse? = withContext(Dispatchers.IO) {
@@ -83,38 +92,62 @@ class GeminiBrainClient {
         if (cleanKey.isBlank()) return@withContext null
 
         val systemInstruction = buildAssistantSystemInstruction(vaultDialogues, preferMalayalam)
-        val userParts = buildJsonArray {
-            if (wavAudioBytes != null && wavAudioBytes.isNotEmpty()) {
-                val b64 = Base64.encodeToString(wavAudioBytes, Base64.NO_WRAP)
-                add(
-                    buildJsonObject {
+        val contents = buildJsonArray {
+            // Include last 6 conversation turns for natural multi-turn follow-ups (e.g. "Which time?" -> "6:30 AM")
+            recentTurns.takeLast(6).forEach { turn ->
+                if (turn.text.isNotBlank()) {
+                    add(buildJsonObject {
+                        put("role", if (turn.isUser) "user" else "model")
+                        put("parts", buildJsonArray {
+                            add(buildJsonObject { put("text", turn.text.take(240)) })
+                        })
+                    })
+                }
+            }
+
+            // Current user turn (inline 8 kHz WAV audio and/or text)
+            val currentParts = buildJsonArray {
+                if (wavAudioBytes != null && wavAudioBytes.isNotEmpty()) {
+                    val b64 = Base64.encodeToString(wavAudioBytes, Base64.NO_WRAP)
+                    add(buildJsonObject {
                         put("inlineData", buildJsonObject {
                             put("mimeType", "audio/wav")
                             put("data", b64)
                         })
+                    })
+                }
+                val promptLine = buildString {
+                    if (!screenContext.isNullOrBlank()) {
+                        appendLine("Visible screen text: ${screenContext.take(800)}")
                     }
-                )
+                    if (!userText.isNullOrBlank()) {
+                        appendLine(userText)
+                    } else {
+                        appendLine("Listen to the user's spoken Malayalam / Manglish / English audio above, transcribe it into heardTranscript, and reply in JSON.")
+                    }
+                }.trim()
+                add(buildJsonObject { put("text", promptLine) })
             }
-            val promptLine = buildString {
-                if (!screenContext.isNullOrBlank()) {
-                    appendLine("Visible screen text: ${screenContext.take(900)}")
-                }
-                if (!userText.isNullOrBlank()) {
-                    appendLine("User message: $userText")
-                } else {
-                    appendLine("Listen carefully to the user's spoken Malayalam / Manglish / English audio above, transcribe it into heardTranscript, understand the meaning/emotion, and respond in JSON.")
-                }
-            }.trim()
-            add(buildJsonObject { put("text", promptLine) })
+            add(buildJsonObject {
+                put("role", "user")
+                put("parts", currentParts)
+            })
         }
 
-        val payload = buildRequestPayload(systemInstruction, userParts, temperature = 0.45, maxTokens = 320)
-        val rawText = callWithModelFallback(cleanKey, payload, defaultHttp) ?: return@withContext null
+        val rawText = callWithModelFallback(
+            apiKey = cleanKey,
+            systemInstruction = systemInstruction,
+            contents = contents,
+            temperature = 0.35,
+            maxTokens = 220,
+            client = SharedGeminiHttp.client
+        ) ?: return@withContext null
+
         parseBrainJson(rawText)
     }
 
     /**
-     * Fast 6-second AI classifier for incoming SMS (bank credit/debit), Gmail, and App Notifications.
+     * Fast incoming message reactor for WhatsApp, SMS (bank credit/debit), Gmail, and App Notifications.
      */
     suspend fun analyzeIncomingMessage(
         apiKey: String,
@@ -127,24 +160,96 @@ class GeminiBrainClient {
         if (cleanKey.isBlank()) return@withContext null
 
         val systemInstruction = buildIncomingReactorInstruction(vaultDialogues)
-        val userParts = buildJsonArray {
-            add(
-                buildJsonObject {
-                    put(
-                        "text",
-                        """
-                        Incoming $source:
-                        Sender: $sender
-                        Message: ${messageText.take(600)}
-                        """.trimIndent()
-                    )
-                }
-            )
+        val contents = buildJsonArray {
+            add(buildJsonObject {
+                put("role", "user")
+                put("parts", buildJsonArray {
+                    add(buildJsonObject {
+                        put(
+                            "text",
+                            "Source: $source\nSender: $sender\nMessage: ${messageText.take(500)}"
+                        )
+                    })
+                })
+            })
         }
 
-        val payload = buildRequestPayload(systemInstruction, userParts, temperature = 0.3, maxTokens = 220)
-        val rawText = callWithModelFallback(cleanKey, payload, fastReactionHttp) ?: return@withContext null
+        val rawText = callWithModelFallback(
+            apiKey = cleanKey,
+            systemInstruction = systemInstruction,
+            contents = contents,
+            temperature = 0.3,
+            maxTokens = 200,
+            client = SharedGeminiHttp.fastClient
+        ) ?: return@withContext null
+
         parseBrainJson(rawText)
+    }
+
+    /**
+     * "✨ Auto-Listen & Fill with AI" in Add/Edit Dialogue sheet:
+     * Sends the picked audio clip directly inline to `gemini-3.5-flash-lite` so Gemini listens to
+     * the Malayalam movie clip and fills Dialogue Name + Manglish/Malayalam/English trigger situations!
+     */
+    suspend fun autoTagAudioClipWithGemini(
+        apiKey: String,
+        audioBytes: ByteArray,
+        mimeType: String,
+        fileName: String
+    ): GemmaClassificationJson? = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isBlank() || audioBytes.isEmpty()) return@withContext null
+
+        val b64 = Base64.encodeToString(audioBytes, Base64.NO_WRAP)
+        val systemInstruction = """
+            You listen to Malayalam movie/comedy audio clips and tag them for a smartphone assistant.
+            Return ONLY valid JSON:
+            {
+              "title": "short catchy dialogue name (e.g. Njan veendum kodeeshwaran)",
+              "heardText": "spoken Malayalam / Manglish transcript of the clip",
+              "category": "exam_fail | money | alarm | low_battery | romance | scolding | greeting | celebration | warning | custom",
+              "situations": ["5 to 8 short Manglish, Malayalam, and English trigger phrases when this clip should play, e.g. eda paisa ayachittund, money received, salary credited, GPay credit"]
+            }
+        """.trimIndent()
+
+        val contents = buildJsonArray {
+            add(buildJsonObject {
+                put("role", "user")
+                put("parts", buildJsonArray {
+                    add(buildJsonObject {
+                        put("inlineData", buildJsonObject {
+                            put("mimeType", mimeType)
+                            put("data", b64)
+                        })
+                    })
+                    add(buildJsonObject {
+                        put("text", "Listen to this Malayalam audio clip (file: $fileName) and return the JSON title, heardText, category, and trigger situations.")
+                    })
+                })
+            })
+        }
+
+        val rawText = callWithModelFallback(
+            apiKey = cleanKey,
+            systemInstruction = systemInstruction,
+            contents = contents,
+            temperature = 0.25,
+            maxTokens = 260,
+            client = SharedGeminiHttp.client
+        ) ?: return@withContext null
+
+        val cleaned = stripMarkdownFences(rawText)
+        val start = cleaned.indexOf('{')
+        val end = cleaned.lastIndexOf('}')
+        if (start < 0 || end <= start) return@withContext null
+        runCatching {
+            val decoded = json.decodeFromString<GemmaClassificationJson>(cleaned.substring(start, end + 1))
+            decoded.copy(
+                title = decoded.title.ifBlank { fileName.substringBeforeLast('.') },
+                category = SituationCategory.fromId(decoded.category).id,
+                situations = decoded.situations.flatMap { it.split(",") }.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+            )
+        }.getOrNull()
     }
 
     suspend fun testApiKey(apiKey: String): Result<String> = withContext(Dispatchers.IO) {
@@ -173,69 +278,153 @@ class GeminiBrainClient {
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
             val res = runCatching {
-                defaultHttp.newCall(req).execute().use { resp ->
+                SharedGeminiHttp.client.newCall(req).execute().use { resp ->
                     val body = resp.body?.string().orEmpty()
                     if (resp.isSuccessful) {
                         val text = extractCandidateText(body)?.trim().orEmpty()
+                        _lastDebugStatus.value = "OK 200 ($model)"
                         return@withContext Result.success("✅ Connected ($model): ${text.ifBlank { "Ready!" }}")
                     } else {
                         lastErr = "HTTP ${resp.code} ($model): ${extractApiErrorMessage(body)}"
-                        if (resp.code == 400 || resp.code == 401 || resp.code == 403) {
+                        _lastDebugStatus.value = lastErr
+                        if (resp.code == 401 || resp.code == 403) {
                             return@withContext Result.failure(IllegalStateException(lastErr))
                         }
                     }
                 }
             }
-            res.onFailure { lastErr = it.message ?: lastErr }
+            res.onFailure {
+                lastErr = "${it.javaClass.simpleName}: ${it.message}"
+                _lastDebugStatus.value = lastErr
+            }
         }
         Result.failure(IllegalStateException(lastErr))
     }
 
     private fun callWithModelFallback(
         apiKey: String,
-        payload: JsonObject,
+        systemInstruction: String,
+        contents: JsonArray,
+        temperature: Double,
+        maxTokens: Int,
         client: OkHttpClient
     ): String? {
-        val bodyStr = payload.toString()
         for (model in BRAIN_MODELS) {
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
-            val req = Request.Builder()
-                .url(url)
-                .post(bodyStr.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-            val text = runCatching {
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use null
-                    val raw = resp.body?.string().orEmpty()
-                    extractCandidateText(raw)
+            // Try with minimal thinkingConfig first on 3.x models for ~0.6-1.0s latency
+            val useThinkingMinimal = model.startsWith("gemini-3")
+            val primaryPayload = buildRequestPayload(
+                systemInstruction = systemInstruction,
+                contents = contents,
+                temperature = temperature,
+                maxTokens = maxTokens,
+                includeMinimalThinking = useThinkingMinimal
+            )
+            val attempt = executeWithSingleTimeoutRetry(model, apiKey, primaryPayload.toString(), client)
+            if (attempt.text != null) {
+                _lastDebugStatus.value = "OK 200 ($model, ${attempt.elapsedMs} ms)"
+                return attempt.text
+            }
+
+            // If HTTP 400 with thinkingConfig, retry same model once without thinkingConfig
+            if (attempt.httpCode == 400 && useThinkingMinimal) {
+                val plainPayload = buildRequestPayload(
+                    systemInstruction = systemInstruction,
+                    contents = contents,
+                    temperature = temperature,
+                    maxTokens = maxTokens,
+                    includeMinimalThinking = false
+                )
+                val retryPlain = executeWithSingleTimeoutRetry(model, apiKey, plainPayload.toString(), client)
+                if (retryPlain.text != null) {
+                    _lastDebugStatus.value = "OK 200 ($model, ${retryPlain.elapsedMs} ms)"
+                    return retryPlain.text
                 }
-            }.getOrNull()
-            if (!text.isNullOrBlank()) return text
+                _lastDebugStatus.value = retryPlain.errorSummary
+            } else {
+                _lastDebugStatus.value = attempt.errorSummary
+            }
+            if (attempt.httpCode == 401 || attempt.httpCode == 403) return null
         }
         return null
     }
 
+    private data class HttpAttemptResult(
+        val text: String? = null,
+        val httpCode: Int = 0,
+        val elapsedMs: Long = 0L,
+        val errorSummary: String = ""
+    )
+
+    private fun executeWithSingleTimeoutRetry(
+        model: String,
+        apiKey: String,
+        bodyStr: String,
+        client: OkHttpClient
+    ): HttpAttemptResult {
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+        var lastError = ""
+        for (attempt in 0..1) {
+            val t0 = System.currentTimeMillis()
+            val req = Request.Builder()
+                .url(url)
+                .post(bodyStr.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+            try {
+                client.newCall(req).execute().use { resp ->
+                    val elapsed = System.currentTimeMillis() - t0
+                    val rawBody = resp.body?.string().orEmpty()
+                    if (resp.isSuccessful) {
+                        val text = extractCandidateText(rawBody)
+                        if (!text.isNullOrBlank()) {
+                            return HttpAttemptResult(text = text, httpCode = resp.code, elapsedMs = elapsed)
+                        }
+                        return HttpAttemptResult(
+                            httpCode = resp.code,
+                            elapsedMs = elapsed,
+                            errorSummary = "Empty candidate from $model"
+                        )
+                    } else {
+                        val errMsg = "HTTP ${resp.code} ($model): ${extractApiErrorMessage(rawBody)}"
+                        // Retry once on transient 500/503/429
+                        if (attempt == 0 && resp.code in listOf(429, 500, 502, 503)) {
+                            lastError = errMsg
+                            continue
+                        }
+                        return HttpAttemptResult(httpCode = resp.code, elapsedMs = elapsed, errorSummary = errMsg)
+                    }
+                }
+            } catch (io: IOException) {
+                lastError = "Network (${model}): ${io.javaClass.simpleName} ${io.message?.take(50).orEmpty()}"
+                if (attempt == 0) continue
+            } catch (e: Exception) {
+                return HttpAttemptResult(errorSummary = "Err ($model): ${e.message?.take(60)}")
+            }
+        }
+        return HttpAttemptResult(errorSummary = lastError)
+    }
+
     private fun buildRequestPayload(
         systemInstruction: String,
-        userParts: JsonArray,
+        contents: JsonArray,
         temperature: Double,
-        maxTokens: Int
+        maxTokens: Int,
+        includeMinimalThinking: Boolean
     ): JsonObject = buildJsonObject {
         put("systemInstruction", buildJsonObject {
             put("parts", buildJsonArray {
                 add(buildJsonObject { put("text", systemInstruction) })
             })
         })
-        put("contents", buildJsonArray {
-            add(buildJsonObject {
-                put("role", "user")
-                put("parts", userParts)
-            })
-        })
+        put("contents", contents)
         put("generationConfig", buildJsonObject {
             put("responseMimeType", "application/json")
             put("temperature", temperature)
             put("maxOutputTokens", maxTokens)
+            if (includeMinimalThinking) {
+                put("thinkingConfig", buildJsonObject {
+                    put("thinkingLevel", "minimal")
+                })
+            }
         })
     }
 
@@ -256,14 +445,24 @@ class GeminiBrainClient {
         return runCatching {
             val root = json.parseToJsonElement(responseBody).jsonObject
             root["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
-        }.getOrNull()?.take(90) ?: "Check API key"
+        }.getOrNull()?.take(80) ?: "Check key/network"
+    }
+
+    private fun stripMarkdownFences(raw: String): String {
+        return raw.trim()
+            .removePrefix("```json")
+            .removePrefix("```JSON")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
     }
 
     private fun parseBrainJson(raw: String): GeminiBrainResponse? {
-        val start = raw.indexOf('{')
-        val end = raw.lastIndexOf('}')
+        val cleaned = stripMarkdownFences(raw)
+        val start = cleaned.indexOf('{')
+        val end = cleaned.lastIndexOf('}')
         if (start < 0 || end <= start) return null
-        val slice = raw.substring(start, end + 1)
+        val slice = cleaned.substring(start, end + 1)
         return runCatching {
             val parsed = json.decodeFromString<GeminiBrainResponse>(slice)
             parsed.copy(
@@ -275,7 +474,7 @@ class GeminiBrainClient {
     private fun formatVaultForPrompt(vault: List<VaultDialogueSummary>): String {
         if (vault.isEmpty()) return "[]"
         return vault.joinToString(prefix = "[", postfix = "]") { d ->
-            val sits = d.situations.take(6).joinToString(", ")
+            val sits = d.situations.take(7).joinToString(", ")
             """{"id":"${d.id}","title":"${d.title}","hasAudio":${d.hasAudio},"situations":"$sits"}"""
         }
     }
@@ -284,13 +483,14 @@ class GeminiBrainClient {
         vault: List<VaultDialogueSummary>,
         preferMalayalam: Boolean
     ): String {
+        val nowTime = SimpleDateFormat("HH:mm (EEEE)", Locale.getDefault()).format(Date())
         val langNote = if (preferMalayalam) {
-            "Always write replyMalayalam in warm, witty, natural conversational Malayalam (1-2 short sentences)."
+            "Write replyMalayalam in warm, witty, natural conversational Malayalam (1-2 short sentences)."
         } else {
-            "Write replyMalayalam in friendly, natural conversational English or Manglish (1-2 short sentences)."
+            "Write replyMalayalam in friendly, concise English or Manglish (1-2 short sentences)."
         }
         return """
-            You are a warm, witty, human-like Malayalam AI smartphone assistant.
+            You are a warm, witty Malayalam AI smartphone assistant. Current local device time: $nowTime.
             $langNote
             You understand natural Malayalam, Manglish, and English speech and text.
 
@@ -298,42 +498,33 @@ class GeminiBrainClient {
             ${formatVaultForPrompt(vault)}
 
             Rules:
-            1. If the user expresses a situation matching one of the stored dialogues AND its hasAudio is true, set "playDialogueId" to that exact dialogue "id". Otherwise set "playDialogueId" to null.
-            2. If the user asks for a phone action, set "action":
-               - Alarm: {"type":"set_alarm","value":"6:30 AM"} (or empty value if time wasn't given)
-               - Open app: {"type":"open_app","value":"WhatsApp"}
-               - Call/Dial: {"type":"dial_call","value":"Amma"}
-               - Add reminder/todo: {"type":"add_todo","value":"Pay KSEB bill"}
-               - Otherwise: {"type":"none","value":""}
-            3. Respond ONLY with valid JSON:
-               {
-                 "heardTranscript": "exact transcript of what user said or typed",
-                 "replyMalayalam": "1-2 short natural sentences",
-                 "playDialogueId": "matching_dialogue_id_or_null",
-                 "action": { "type": "none | set_alarm | open_app | dial_call | add_todo", "value": "..." },
-                 "ttsStyle": "cheerful and friendly | sympathetic and warm | dramatic and teasing | calm"
-               }
+            1. If the user expresses a situation matching one of the stored dialogues AND its hasAudio is true, set "playDialogueId" to that exact dialogue "id". Otherwise null.
+            2. Alarm Rules:
+               - If the user wants to set an alarm WITHOUT specifying a time (e.g. "set an alarm" / "അലാറം വെക്കണം"):
+                 set action.type = "none", expectFollowUp = true, and replyMalayalam = "എത്ര മണിക്കാണ് അലാറം വെക്കേണ്ടത്?".
+               - If the user gives a time (either directly or answering your previous question like "6:30 morning" / "രാവിലെ ആറര"):
+                 set action.type = "set_alarm", action.hour = <0..23>, action.minute = <0..59>, action.label = "Assistant Alarm", expectFollowUp = false, and confirm in replyMalayalam!
+            3. Other actions:
+               - open_app: {"type":"open_app","value":"WhatsApp"}
+               - dial_call: {"type":"dial_call","value":"Amma"}
+               - add_todo: {"type":"add_todo","value":"Pay KSEB bill"}
+            4. Respond ONLY with compact JSON:
+               {"heardTranscript":"...","replyMalayalam":"...","playDialogueId":null,"expectFollowUp":false,"action":{"type":"none","hour":null,"minute":null,"label":"","value":""},"ttsStyle":"cheerful and friendly"}
         """.trimIndent()
     }
 
     private fun buildIncomingReactorInstruction(vault: List<VaultDialogueSummary>): String = """
-        You react to incoming phone SMS, Gmail emails, and notifications for a Malayalam user.
+        You react to incoming WhatsApp messages, SMS, GPay/PhonePe alerts, and Gmail emails for a Malayalam user.
         Stored User Movie Dialogue Vault:
         ${formatVaultForPrompt(vault)}
 
         Rules:
-        1. Set "skipReaction": true for OTP codes, spam, ads, marketing promos, delivery tracking, or boring automated alerts (EXCEPT bank money credit/debit and exam results — always react to bank credit/debit and exam results!).
-        2. If the message matches a stored dialogue with "hasAudio": true (e.g. bank money credited, bank money debited/spent, exam failed/arrear/supply), set "playDialogueId" to that exact "id".
-        3. Also write a short, witty, 1-sentence natural Malayalam reaction in "replyMalayalam" (mentioning the amount/context playfully for bank credit/debit or comforting/teasing for exam/personal messages).
-        4. Respond ONLY with valid JSON:
-           {
-             "heardTranscript": "",
-             "replyMalayalam": "1 short witty Malayalam reaction",
-             "playDialogueId": "matching_id_or_null",
-             "action": { "type": "none", "value": "" },
-             "ttsStyle": "cheerful and friendly | sympathetic and warm | dramatic and teasing | calm",
-             "skipReaction": false
-           }
+        1. Set "shouldReact": false ONLY for OTPs, spam, ads, marketing promos, or boring automated tracking.
+           ALWAYS set "shouldReact": true for: bank money credit/debit, UPI/GPay/PhonePe transfers, exam results, AND personal WhatsApp/friend messages (even in Manglish like "eda paisa ayachittund").
+        2. Understand Malayalam, Manglish, and English meaning: if the message matches any stored dialogue with "hasAudio": true, set "playDialogueId" to that exact "id".
+        3. Always write a short, witty, human-like 1-sentence Malayalam reaction in "replyMalayalam" (used as spoken voice reaction if no MP3 clip matches!).
+        4. Respond ONLY with compact JSON:
+           {"heardTranscript":"","replyMalayalam":"...","playDialogueId":null,"expectFollowUp":false,"shouldReact":true,"action":{"type":"none","value":""},"ttsStyle":"cheerful and friendly | sympathetic and warm | dramatic and teasing | calm"}
     """.trimIndent()
 
     companion object {

@@ -2,8 +2,10 @@ package com.malayalam.assistant.ai
 
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -12,16 +14,18 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
+import java.io.BufferedReader
+import java.io.InputStreamReader
 
 /**
- * Expressive Natural Malayalam Voice TTS Client via Google AI Studio REST (`v1beta`):
- *  - Primary: `gemini-3.8-flash-lite-tts` with `speech_metadata: { style: ttsStyle }` and chosen voice (`Kore`, `Puck`, `Aoede`, `Zephyr`, `Fenrir`, `Charon`).
- *  - Automatic Fallback: `gemini-2.5-flash-preview-tts` (`temperature: 1.0`) if 3.8 TTS returns HTTP 400/404.
- *  - Returns decoded 24 kHz 16-bit mono PCM bytes ready for zero-latency `AudioTrack` playback.
+ * Low-Latency Streaming Google AI Studio TTS Client (`v1beta`):
+ *  - Primary: **SSE Streaming** (`gemini-3.8-flash-lite-tts:streamGenerateContent?alt=sse`) over
+ *    `SharedGeminiHttp.client` keep-alive HTTP/2 pool — yields raw 24 kHz 16-bit mono PCM chunks
+ *    immediately as SSE frames arrive so the first word starts speaking within ~1 second!
+ *  - Clean non-streaming fallback (`gemini-3.8-flash-lite-tts:generateContent` -> `gemini-2.5-flash-preview-tts`)
+ *    if SSE streaming fails.
  */
 class GeminiTtsClient {
 
@@ -30,91 +34,100 @@ class GeminiTtsClient {
         isLenient = true
     }
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(22, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
-
-    suspend fun synthesizePcm24kMono(
+    /**
+     * Streams decoded 24 kHz 16-bit signed little-endian mono PCM chunks via [onPcmChunk].
+     * Returns `true` if at least one audio chunk was streamed, `false` to let caller fall back.
+     */
+    suspend fun streamPcm24kMono(
         apiKey: String,
         text: String,
         voiceName: String = "Kore",
-        ttsStyle: String = "cheerful and friendly"
-    ): ByteArray? = withContext(Dispatchers.IO) {
+        ttsStyle: String = "cheerful and friendly",
+        onPcmChunk: (ByteArray) -> Unit
+    ): Boolean = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
         val cleanText = text.replace(Regex("[🎬🔊✅⚠️✦]"), "").trim()
-        if (cleanKey.isBlank() || cleanText.isBlank()) return@withContext null
+        if (cleanKey.isBlank() || cleanText.isBlank()) return@withContext false
 
         val safeVoice = voiceName.ifBlank { "Kore" }
+        val primaryPayload = buildTtsPayload(
+            text = cleanText,
+            voiceName = safeVoice,
+            ttsStyle = ttsStyle,
+            useMetadataStyle = true
+        )
 
-        // 1. Primary: gemini-3.8-flash-lite-tts with speech_metadata.style
-        val primaryPayload = buildJsonObject {
-            put("contents", buildJsonArray {
-                add(buildJsonObject {
-                    put("parts", buildJsonArray {
-                        add(buildJsonObject {
-                            put("text", cleanText)
-                            put("speech_metadata", buildJsonObject {
-                                put("style", ttsStyle.ifBlank { "cheerful and friendly" })
-                            })
-                        })
-                    })
-                })
-            })
-            put("generationConfig", buildJsonObject {
-                put("responseModalities", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("AUDIO")) })
-                put("speechConfig", buildJsonObject {
-                    put("voiceConfig", buildJsonObject {
-                        put("prebuiltVoiceConfig", buildJsonObject {
-                            put("voiceName", safeVoice)
-                        })
-                    })
-                })
-            })
-        }
-
-        val primaryAudio = requestPcmBytes(
+        // 1. Primary: SSE Streaming (`streamGenerateContent?alt=sse`) for sub-second time-to-first-audio!
+        val streamedPrimary = runSseAudioStream(
             model = "gemini-3.8-flash-lite-tts",
             apiKey = cleanKey,
-            payload = primaryPayload.toString()
+            payload = primaryPayload,
+            onPcmChunk = onPcmChunk
         )
-        if (primaryAudio != null && primaryAudio.isNotEmpty()) {
-            return@withContext primaryAudio
-        }
+        if (streamedPrimary) return@withContext true
 
-        // 2. Fallback: gemini-2.5-flash-preview-tts (temperature 1.0, inline style instruction)
-        val fallbackPayload = buildJsonObject {
-            put("contents", buildJsonArray {
-                add(buildJsonObject {
-                    put("parts", buildJsonArray {
-                        add(buildJsonObject {
-                            put("text", "Speak in a $ttsStyle tone: $cleanText")
-                        })
-                    })
-                })
-            })
-            put("generationConfig", buildJsonObject {
-                put("temperature", 1.0)
-                put("responseModalities", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("AUDIO")) })
-                put("speechConfig", buildJsonObject {
-                    put("voiceConfig", buildJsonObject {
-                        put("prebuiltVoiceConfig", buildJsonObject {
-                            put("voiceName", safeVoice)
-                        })
-                    })
-                })
-            })
-        }
-
-        requestPcmBytes(
+        // 2. Fallback SSE stream with 2.5 preview TTS (inline style prompt)
+        val fallbackPayload = buildTtsPayload(
+            text = "Speak in a $ttsStyle tone: $cleanText",
+            voiceName = safeVoice,
+            ttsStyle = ttsStyle,
+            useMetadataStyle = false
+        )
+        val streamedFallback = runSseAudioStream(
             model = "gemini-2.5-flash-preview-tts",
             apiKey = cleanKey,
-            payload = fallbackPayload.toString()
+            payload = fallbackPayload,
+            onPcmChunk = onPcmChunk
         )
+        if (streamedFallback) return@withContext true
+
+        // 3. Final non-streaming REST fallback
+        val fullPcm = requestFullPcmBytes("gemini-3.8-flash-lite-tts", cleanKey, primaryPayload)
+            ?: requestFullPcmBytes("gemini-2.5-flash-preview-tts", cleanKey, fallbackPayload)
+        if (fullPcm != null && fullPcm.isNotEmpty()) {
+            onPcmChunk(fullPcm)
+            return@withContext true
+        }
+        false
     }
 
-    private fun requestPcmBytes(
+    private suspend fun runSseAudioStream(
+        model: String,
+        apiKey: String,
+        payload: String,
+        onPcmChunk: (ByteArray) -> Unit
+    ): Boolean = withContext(Dispatchers.IO) {
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse&key=$apiKey"
+        val req = Request.Builder()
+            .url(url)
+            .header("Accept", "text/event-stream")
+            .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        runCatching {
+            var emittedAnyAudio = false
+            SharedGeminiHttp.client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use false
+                val stream = resp.body?.byteStream() ?: return@use false
+                BufferedReader(InputStreamReader(stream, Charsets.UTF_8), 8192).use { reader ->
+                    while (isActive) {
+                        val line = reader.readLine() ?: break
+                        if (!line.startsWith("data:")) continue
+                        val jsonChunk = line.removePrefix("data:").trim()
+                        if (jsonChunk.isBlank() || jsonChunk == "[DONE]") continue
+                        val pcmBytes = extractAudioBytesFromJson(jsonChunk)
+                        if (pcmBytes != null && pcmBytes.isNotEmpty()) {
+                            onPcmChunk(pcmBytes)
+                            emittedAnyAudio = true
+                        }
+                    }
+                }
+            }
+            emittedAnyAudio
+        }.getOrDefault(false)
+    }
+
+    private fun requestFullPcmBytes(
         model: String,
         apiKey: String,
         payload: String
@@ -126,26 +139,65 @@ class GeminiTtsClient {
             .build()
 
         return runCatching {
-            httpClient.newCall(req).execute().use { resp ->
+            SharedGeminiHttp.client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@use null
                 val body = resp.body?.string().orEmpty()
-                val root = json.parseToJsonElement(body).jsonObject
-                val parts = root["candidates"]?.jsonArray
-                    ?.firstOrNull()?.jsonObject
-                    ?.get("content")?.jsonObject
-                    ?.get("parts")?.jsonArray ?: return@use null
-
-                for (part in parts) {
-                    val inlineData = part.jsonObject["inlineData"]?.jsonObject ?: continue
-                    val b64 = inlineData["data"]?.jsonPrimitive?.contentOrNull
-                    if (!b64.isNullOrBlank()) {
-                        return@use Base64.decode(b64, Base64.DEFAULT)
-                    }
-                }
-                null
+                extractAudioBytesFromJson(body)
             }
         }.getOrNull()
     }
+
+    private fun extractAudioBytesFromJson(jsonString: String): ByteArray? {
+        return runCatching {
+            val root = json.parseToJsonElement(jsonString).jsonObject
+            val parts = root["candidates"]?.jsonArray
+                ?.firstOrNull()?.jsonObject
+                ?.get("content")?.jsonObject
+                ?.get("parts")?.jsonArray ?: return@runCatching null
+
+            for (part in parts) {
+                val inlineData = part.jsonObject["inlineData"]?.jsonObject ?: continue
+                val b64 = inlineData["data"]?.jsonPrimitive?.contentOrNull
+                if (!b64.isNullOrBlank()) {
+                    return@runCatching Base64.decode(b64, Base64.DEFAULT)
+                }
+            }
+            null
+        }.getOrNull()
+    }
+
+    private fun buildTtsPayload(
+        text: String,
+        voiceName: String,
+        ttsStyle: String,
+        useMetadataStyle: Boolean
+    ): String = buildJsonObject {
+        put("contents", buildJsonArray {
+            add(buildJsonObject {
+                put("parts", buildJsonArray {
+                    add(buildJsonObject {
+                        put("text", text)
+                        if (useMetadataStyle) {
+                            put("speech_metadata", buildJsonObject {
+                                put("style", ttsStyle.ifBlank { "cheerful and friendly" })
+                            })
+                        }
+                    })
+                })
+            })
+        })
+        put("generationConfig", buildJsonObject {
+            if (!useMetadataStyle) put("temperature", 1.0)
+            put("responseModalities", buildJsonArray { add(JsonPrimitive("AUDIO")) })
+            put("speechConfig", buildJsonObject {
+                put("voiceConfig", buildJsonObject {
+                    put("prebuiltVoiceConfig", buildJsonObject {
+                        put("voiceName", voiceName)
+                    })
+                })
+            })
+        })
+    }.toString()
 
     companion object {
         const val OUTPUT_SAMPLE_RATE = 24_000

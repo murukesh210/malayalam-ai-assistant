@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import com.malayalam.assistant.ai.GeminiTtsClient
 import com.malayalam.assistant.data.DialogueEntry
 import kotlinx.coroutines.CoroutineScope
@@ -32,9 +33,8 @@ data class PlaybackState(
 )
 
 /**
- * Deduplicates automatic background triggers (`SMS` + `Gmail` + `NotificationListener`)
- * by `sourceKey + normalizedTextHash` AND `dialogueId` with a strict 60-second cooldown
- * so the same notification/SMS/email NEVER loops or repeats twice.
+ * Deduplicates automatic background triggers (`WhatsApp` + `SMS` + `Gmail` + `NotificationListener`)
+ * with a strict 60-second cooldown so the same message NEVER loops or repeats twice.
  */
 object TriggerDeduplicator {
     private const val COOLDOWN_MS = 60_000L
@@ -78,11 +78,11 @@ object TriggerDeduplicator {
 
 /**
  * Singleton Audio Player supporting:
- *  1. `MediaPlayer` for Malayalam movie dialogue MP3/WAV/OGG clips (`isLooping = false`,
- *     strict AudioFocus request/abandon, guaranteed `releaseAndReset()` on completion & error
- *     posting `isPlaying = false` on `Dispatchers.Main` so the orb unlocks automatically).
- *  2. `AudioTrack` (`24000 Hz`, mono, 16-bit PCM) for expressive Google AI Studio Gemini TTS.
- *  3. Offline Android `TextToSpeech` (`ml-IN` / `en-IN`) fallback ONLY when offline / no API key.
+ *  1. `MediaPlayer` for Malayalam movie clips (`isLooping = false`, AudioFocus, auto-release on finish).
+ *  2. **Live Streaming `AudioTrack`** (`24000 Hz`, mono, 16-bit PCM, `MODE_STREAM`) fed chunk-by-chunk
+ *     directly from `GeminiTtsClient.streamPcm24kMono(...)` so speech begins within ~1 second!
+ *  3. Offline Android `TextToSpeech` (`ml-IN` / `en-IN`) fallback ONLY when offline or no API key,
+ *     with `onFinished` callback support for automatic follow-up mic activation!
  */
 class DialogueAudioPlayer(private val context: Context) {
 
@@ -98,6 +98,7 @@ class DialogueAudioPlayer(private val context: Context) {
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var pendingTtsOnFinished: (() -> Unit)? = null
 
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -122,7 +123,7 @@ class DialogueAudioPlayer(private val context: Context) {
         val cleaned = uriString.trim()
         if (cleaned.isBlank()) return false
         synchronized(lock) {
-            releaseAndResetUnlocked(invokeFinished = false)
+            releaseAndResetUnlocked()
             requestTransientAudioFocus()
             return runCatching {
                 val uri = Uri.parse(cleaned)
@@ -159,84 +160,15 @@ class DialogueAudioPlayer(private val context: Context) {
                 )
                 true
             }.getOrElse {
-                releaseAndResetUnlocked(invokeFinished = false)
+                releaseAndResetUnlocked()
                 false
             }
         }
     }
 
     /**
-     * Streams decoded 24 kHz 16-bit mono PCM returned by `GeminiTtsClient` directly into `AudioTrack`,
-     * animating the center orb while speaking and calling `releaseAndReset()` automatically on finish.
-     */
-    fun playPcm24kMono(
-        pcmBytes: ByteArray,
-        displayTitle: String,
-        onFinished: (() -> Unit)? = null
-    ) {
-        if (pcmBytes.isEmpty()) {
-            onFinished?.let { mainHandler.post(it) }
-            return
-        }
-        synchronized(lock) {
-            releaseAndResetUnlocked(invokeFinished = false)
-            requestTransientAudioFocus()
-            postPlaybackState(
-                PlaybackState(
-                    isPlaying = true,
-                    activeDialogueId = "gemini_tts",
-                    activeTitle = displayTitle,
-                    activeTranscript = ""
-                )
-            )
-            pcmPlaybackJob = audioScope.launch {
-                var track: AudioTrack? = null
-                try {
-                    val minBuf = AudioTrack.getMinBufferSize(
-                        GeminiTtsClient.OUTPUT_SAMPLE_RATE,
-                        AudioFormat.CHANNEL_OUT_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT
-                    ).coerceAtLeast(4096)
-
-                    track = AudioTrack.Builder()
-                        .setAudioAttributes(speechMediaAttributes())
-                        .setAudioFormat(
-                            AudioFormat.Builder()
-                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                                .setSampleRate(GeminiTtsClient.OUTPUT_SAMPLE_RATE)
-                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                                .build()
-                        )
-                        .setBufferSizeInBytes(minBuf * 2)
-                        .setTransferMode(AudioTrack.MODE_STREAM)
-                        .build()
-
-                    synchronized(lock) { audioTrack = track }
-                    track.play()
-
-                    var offset = 0
-                    val chunkSize = 4096
-                    while (offset < pcmBytes.size && track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                        val toWrite = minOf(chunkSize, pcmBytes.size - offset)
-                        val written = track.write(pcmBytes, offset, toWrite)
-                        if (written <= 0) break
-                        offset += written
-                    }
-                    runCatching { track.stop() }
-                } catch (_: Exception) {
-                    // Clean release in finally
-                } finally {
-                    releaseAndReset()
-                    onFinished?.let { cb -> mainHandler.post(cb) }
-                }
-            }
-        }
-    }
-
-    /**
-     * Primary expressive speech output:
-     *  - Uses Google AI Studio `GeminiTtsClient` (natural Malayalam voice) whenever `apiKey` is present.
-     *  - Falls back to Android's built-in offline `TextToSpeech` (`ml-IN`) ONLY when offline or no API key.
+     * Streams expressive Gemini TTS directly into a live `AudioTrack` (`MODE_STREAM`) chunk-by-chunk
+     * as SSE frames arrive, invoking [onFinished] on the main thread right when speaking ends!
      */
     suspend fun speakNaturalReply(
         text: String,
@@ -244,27 +176,116 @@ class DialogueAudioPlayer(private val context: Context) {
         ttsClient: GeminiTtsClient,
         voiceName: String,
         ttsStyle: String,
-        preferMalayalam: Boolean
+        preferMalayalam: Boolean,
+        onFinished: (() -> Unit)? = null
     ) {
-        if (text.isBlank()) return
+        if (text.isBlank()) {
+            onFinished?.let { mainHandler.post(it) }
+            return
+        }
+
         if (apiKey.isNotBlank()) {
-            val pcm = ttsClient.synthesizePcm24kMono(
+            val streamed = streamLiveGeminiTts(
+                text = text,
+                apiKey = apiKey,
+                ttsClient = ttsClient,
+                voiceName = voiceName,
+                ttsStyle = ttsStyle,
+                onFinished = onFinished
+            )
+            if (streamed) return
+        }
+
+        // Offline / no-key fallback
+        speakShortReplyIfIdle(text, preferMalayalam, onFinished)
+    }
+
+    private suspend fun streamLiveGeminiTts(
+        text: String,
+        apiKey: String,
+        ttsClient: GeminiTtsClient,
+        voiceName: String,
+        ttsStyle: String,
+        onFinished: (() -> Unit)?
+    ): Boolean {
+        var track: AudioTrack? = null
+        var started = false
+
+        val success = try {
+            ttsClient.streamPcm24kMono(
                 apiKey = apiKey,
                 text = text,
                 voiceName = voiceName,
                 ttsStyle = ttsStyle
-            )
-            if (pcm != null && pcm.isNotEmpty()) {
-                playPcm24kMono(pcmBytes = pcm, displayTitle = text.take(48))
-                return
+            ) { chunk ->
+                if (!started) {
+                    synchronized(lock) {
+                        releaseAndResetUnlocked()
+                        requestTransientAudioFocus()
+                        val minBuf = AudioTrack.getMinBufferSize(
+                            GeminiTtsClient.OUTPUT_SAMPLE_RATE,
+                            AudioFormat.CHANNEL_OUT_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT
+                        ).coerceAtLeast(4096)
+
+                        val created = AudioTrack.Builder()
+                            .setAudioAttributes(speechMediaAttributes())
+                            .setAudioFormat(
+                                AudioFormat.Builder()
+                                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                    .setSampleRate(GeminiTtsClient.OUTPUT_SAMPLE_RATE)
+                                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                    .build()
+                            )
+                            .setBufferSizeInBytes(minBuf * 2)
+                            .setTransferMode(AudioTrack.MODE_STREAM)
+                            .build()
+                        created.play()
+                        track = created
+                        audioTrack = created
+                    }
+                    started = true
+                    postPlaybackState(
+                        PlaybackState(
+                            isPlaying = true,
+                            activeDialogueId = "gemini_tts_stream",
+                            activeTitle = text.take(48),
+                            activeTranscript = ""
+                        )
+                    )
+                }
+
+                val activeTrack = track
+                if (activeTrack != null && activeTrack.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    var offset = 0
+                    while (offset < chunk.size && activeTrack.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                        val written = activeTrack.write(chunk, offset, minOf(4096, chunk.size - offset))
+                        if (written <= 0) break
+                        offset += written
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            false
+        } finally {
+            if (started) {
+                runCatching { track?.stop() }
+                releaseAndReset()
+                onFinished?.let { cb -> mainHandler.post(cb) }
             }
         }
-        // Fallback ONLY when offline or API key missing/failed
-        speakShortReplyIfIdle(text, preferMalayalam)
+        return success && started
     }
 
-    fun speakShortReplyIfIdle(text: String, preferMalayalam: Boolean = true) {
-        if (text.isBlank() || _playbackState.value.isPlaying) return
+    fun speakShortReplyIfIdle(
+        text: String,
+        preferMalayalam: Boolean = true,
+        onFinished: (() -> Unit)? = null
+    ) {
+        if (text.isBlank() || _playbackState.value.isPlaying) {
+            onFinished?.let { mainHandler.post(it) }
+            return
+        }
         val spokenClean = text
             .replace(Regex("[•✅⚠️🔊✦🎬]"), "")
             .lineSequence()
@@ -272,20 +293,48 @@ class DialogueAudioPlayer(private val context: Context) {
             ?.trim()
             ?.take(140)
             .orEmpty()
-        if (spokenClean.isBlank()) return
+        if (spokenClean.isBlank()) {
+            onFinished?.let { mainHandler.post(it) }
+            return
+        }
 
         synchronized(lock) {
+            pendingTtsOnFinished = onFinished
             if (tts == null) {
                 tts = TextToSpeech(context.applicationContext) { status ->
                     if (status == TextToSpeech.SUCCESS) {
                         ttsReady = true
+                        attachTtsListener()
                         speakInternal(spokenClean, preferMalayalam)
+                    } else {
+                        pendingTtsOnFinished?.let { mainHandler.post(it) }
+                        pendingTtsOnFinished = null
                     }
                 }
             } else if (ttsReady) {
+                attachTtsListener()
                 speakInternal(spokenClean, preferMalayalam)
             }
         }
+    }
+
+    private fun attachTtsListener() {
+        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) = Unit
+            override fun onDone(utteranceId: String?) {
+                val cb = synchronized(lock) {
+                    val tmp = pendingTtsOnFinished
+                    pendingTtsOnFinished = null
+                    tmp
+                }
+                cb?.let { mainHandler.post(it) }
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                onDone(utteranceId)
+            }
+        })
     }
 
     private fun speakInternal(text: String, preferMalayalam: Boolean) {
@@ -306,13 +355,14 @@ class DialogueAudioPlayer(private val context: Context) {
 
     fun releaseAndReset() {
         synchronized(lock) {
-            releaseAndResetUnlocked(invokeFinished = false)
+            releaseAndResetUnlocked()
         }
     }
 
-    private fun releaseAndResetUnlocked(invokeFinished: Boolean) {
+    private fun releaseAndResetUnlocked() {
         pcmPlaybackJob?.cancel()
         pcmPlaybackJob = null
+        pendingTtsOnFinished = null
 
         runCatching { tts?.stop() }
 
@@ -339,9 +389,7 @@ class DialogueAudioPlayer(private val context: Context) {
     }
 
     private fun postPlaybackState(newState: PlaybackState) {
-        mainHandler.post {
-            _playbackState.value = newState
-        }
+        mainHandler.post { _playbackState.value = newState }
     }
 
     private fun speechMediaAttributes(): AudioAttributes =
@@ -361,9 +409,7 @@ class DialogueAudioPlayer(private val context: Context) {
 
     private fun abandonAudioFocus() {
         val am = audioManager ?: return
-        focusRequest?.let { req ->
-            runCatching { am.abandonAudioFocusRequest(req) }
-        }
+        focusRequest?.let { req -> runCatching { am.abandonAudioFocusRequest(req) } }
         focusRequest = null
     }
 }

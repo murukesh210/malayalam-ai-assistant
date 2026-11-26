@@ -49,19 +49,31 @@ class FunctionGemmaRouter(
     /**
      * Executes a structured action returned directly by `GeminiBrainClient`:
      * `type`: `set_alarm | open_app | dial_call | add_todo | none`.
+     * For `set_alarm`, fires `EXTRA_SKIP_UI = true` silently in the background when hour is known!
      */
-    suspend fun executeGeminiAction(type: String, value: String): ActionExecutionResult = withContext(Dispatchers.IO) {
+    suspend fun executeGeminiAction(
+        type: String,
+        value: String = "",
+        hour: Int? = null,
+        minute: Int? = null,
+        label: String = ""
+    ): ActionExecutionResult = withContext(Dispatchers.IO) {
         val ml = prefs.snapshot().isMalayalamMode
         val cleanType = type.trim().lowercase()
         val cleanVal = value.trim()
         when (cleanType) {
             "set_alarm" -> {
-                val parsed = parseMalayalamOrEnglishTime(cleanVal)
-                if (parsed != null) {
-                    setDeviceAlarm(parsed.first, parsed.second, "Malayalam Assistant", ml)
+                val resolvedHour = hour ?: parseMalayalamOrEnglishTime(cleanVal)?.first
+                val resolvedMin = minute ?: parseMalayalamOrEnglishTime(cleanVal)?.second ?: 0
+                if (resolvedHour != null) {
+                    setDeviceAlarm(
+                        hour24 = resolvedHour.coerceIn(0, 23),
+                        minute = resolvedMin.coerceIn(0, 59),
+                        label = label.ifBlank { "Malayalam Assistant" },
+                        ml = ml
+                    )
                 } else {
                     pendingAlarmAwaitingTime = true
-                    openClockAlarmUi()
                     ActionExecutionResult(
                         handledAsAction = true,
                         summaryText = if (ml) "എത്ര മണിക്കാണ് അലാറം വെക്കേണ്ടത്?" else "What time should I set the alarm for?",
@@ -159,17 +171,16 @@ class FunctionGemmaRouter(
                 setDeviceAlarm(parsedTime.first, parsedTime.second, "Malayalam Assistant", ml)
             } else {
                 // NO time was specified (e.g., "സെറ്റ് അലാം" or "set an alarm"):
-                // Remember pending state AND open Clock alarm UI cleanly without skipping UI!
+                // DO NOT open Clock UI — ask naturally and let auto-listen capture the time!
                 pendingAlarmAwaitingTime = true
-                openClockAlarmUi()
                 ActionExecutionResult(
                     handledAsAction = true,
                     summaryText = if (ml) {
-                        "എത്ര മണിക്കാണ് അലാറം വെക്കേണ്ടത്? (ഉദാഹരണത്തിന്: 'രാവിലെ 6:30' എന്ന് പറയൂ)"
+                        "എത്ര മണിക്കാണ് അലാറം വെക്കേണ്ടത്?"
                     } else {
-                        "What time should I set the alarm for? (Say e.g. '6:30 AM')"
+                        "What time should I set the alarm for?"
                     },
-                    reactionQuery = "alarm wake up morning",
+                    reactionQuery = "",
                     usedFunctionGemma = false,
                     awaitingFollowUp = true
                 )

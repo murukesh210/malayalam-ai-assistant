@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.malayalam.assistant.AppGraph
+import com.malayalam.assistant.ai.ConversationHistoryItem
 import com.malayalam.assistant.ai.EmbeddingMatcherEngine
 import com.malayalam.assistant.ai.GeminiBrainClient
 import com.malayalam.assistant.ai.GeminiBrainResponse
@@ -14,7 +15,9 @@ import com.malayalam.assistant.data.AppPreferences
 import com.malayalam.assistant.data.DialogueEntry
 import com.malayalam.assistant.data.MatchCandidate
 import com.malayalam.assistant.data.PendingReviewEntity
+import com.malayalam.assistant.data.SituationCategory
 import com.malayalam.assistant.data.UserSettings
+import com.malayalam.assistant.service.AssistantKeepAliveService
 import com.malayalam.assistant.service.GmailDirectWatcherService
 import com.malayalam.assistant.service.GmailImapClient
 import com.malayalam.assistant.worker.AudioAutoOrganizeWorker
@@ -29,6 +32,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import java.util.UUID
 
 data class ChatTurn(
     val id: Long = System.nanoTime(),
@@ -36,6 +40,19 @@ data class ChatTurn(
     val text: String,
     val badge: String = "",
     val triggeredClipTitle: String? = null
+)
+
+data class DialogueEditorDraft(
+    val existingId: String? = null,
+    val title: String = "",
+    val heardText: String = "",
+    val category: String = SituationCategory.CUSTOM.id,
+    val situationsCsv: String = "",
+    val triggerApps: Set<String> = setOf("ALL"), // ALL, WHATSAPP, SMS, GMAIL
+    val fileName: String = "",
+    val audioUriString: String = "",
+    val isAutoTagging: Boolean = false,
+    val statusNote: String = ""
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -53,6 +70,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val dialogues = graph.vaultRepository.dialogues
     val pipelineProgress = graph.pipelineTracker.state
     val modelStates = graph.modelDownloadManager.states
+    val lastApiDebugStatus = graph.geminiBrainClient.lastDebugStatus
+    val liveMonitorLogs = graph.incomingMessageReactor.liveMonitorLogs
 
     val playableAudioMap: StateFlow<Map<String, Boolean>> = dialogues
         .map { list ->
@@ -101,6 +120,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _simulatorResults = MutableStateFlow<List<MatchCandidate>>(emptyList())
     val simulatorResults: StateFlow<List<MatchCandidate>> = _simulatorResults.asStateFlow()
 
+    private val _simulatorAiNote = MutableStateFlow("")
+    val simulatorAiNote: StateFlow<String> = _simulatorAiNote.asStateFlow()
+
     private val _vaultBannerMessage = MutableStateFlow("")
     val vaultBannerMessage: StateFlow<String> = _vaultBannerMessage.asStateFlow()
 
@@ -109,6 +131,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _geminiKeyTestResult = MutableStateFlow("")
     val geminiKeyTestResult: StateFlow<String> = _geminiKeyTestResult.asStateFlow()
+
+    private val _whatsappSimStatus = MutableStateFlow("")
+    val whatsappSimStatus: StateFlow<String> = _whatsappSimStatus.asStateFlow()
+
+    private val _editorDraft = MutableStateFlow<DialogueEditorDraft?>(null)
+    val editorDraft: StateFlow<DialogueEditorDraft?> = _editorDraft.asStateFlow()
 
     fun updateLivePartialSpeech(partial: String) {
         if (partial.isNotBlank()) _heroGreetingOrReply.value = partial
@@ -122,12 +150,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _heroGreetingOrReply.value = if (settings.value.isMalayalamMode) "നമസ്കാരം" else "Namaskaram"
     }
 
-    /**
-     * Real VAD Mic Recording (`SmartVoiceRecorder`):
-     *  - If already recording, tapping immediately ends capture and sends captured audio to Gemini.
-     *  - Otherwise calibrates 350ms ambient noise, waits up to 8s for speech, auto-stops after
-     *    1500ms of silence, and sends 16 kHz WAV straight to `GeminiBrainClient`!
-     */
     fun toggleSmartVadRecording() {
         if (_isListeningVad.value || voiceRecorder.isRecording) {
             voiceRecorder.stopRecordingNow()
@@ -137,11 +159,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             graph.audioPlayer.stop()
             return
         }
+        startVadCapture()
+    }
 
+    private fun startVadCapture() {
         vadRecordingJob?.cancel()
         vadRecordingJob = viewModelScope.launch {
             _isListeningVad.value = true
-            _micRmsLevel.value = 0.15f
+            _micRmsLevel.value = 0.16f
             val recording = voiceRecorder.recordWithVad { rms ->
                 _micRmsLevel.value = rms
             }
@@ -149,14 +174,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _micRmsLevel.value = 0f
 
             if (!recording.speechDetected || recording.wavBytes.isEmpty()) {
-                // No speech within 8 seconds -> return cleanly to Namaskaram without error
                 resetGreetingToNamaskaram()
                 return@launch
             }
-
             sendWavAudioToGemini(recording.wavBytes)
         }
     }
+
+    private fun recentTurnsForBrain(): List<ConversationHistoryItem> =
+        _chatHistory.value.takeLast(6).map { ConversationHistoryItem(isUser = it.isUser, text = it.text) }
 
     private suspend fun sendWavAudioToGemini(wavBytes: ByteArray) {
         _isThinking.value = true
@@ -171,6 +197,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val aiResp = graph.geminiBrainClient.askWithTextOrAudio(
                 apiKey = apiKey,
                 wavAudioBytes = wavBytes,
+                recentTurns = recentTurnsForBrain(),
                 vaultDialogues = summaries,
                 preferMalayalam = curSettings.isMalayalamMode
             )
@@ -178,12 +205,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (aiResp != null) {
                 handleGeminiBrainResponse(aiResp, apiKey, curSettings)
             } else {
-                val offlineMsg = if (curSettings.isMalayalamMode) {
-                    "ഇന്റർനെറ്റ് കണക്ഷൻ അല്ലെങ്കിൽ API കീ പരിശോധിക്കുക."
+                val debugHint = graph.geminiBrainClient.lastDebugStatus.value
+                _heroGreetingOrReply.value = if (curSettings.isMalayalamMode) {
+                    "ക്ഷമിക്കണം, മറുപടി ലഭിച്ചില്ല ($debugHint)"
                 } else {
-                    "Check internet connection or Google AI Studio API key."
+                    "Could not reach Gemini ($debugHint)"
                 }
-                _heroGreetingOrReply.value = offlineMsg
             }
         } finally {
             _isThinking.value = false
@@ -194,6 +221,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val text = rawInput.trim()
         if (text.isBlank() || _isThinking.value) return
 
+        val historyBeforeCurrent = recentTurnsForBrain()
         _chatHistory.value = (_chatHistory.value + ChatTurn(isUser = true, text = text)).takeLast(40)
         _isThinking.value = true
 
@@ -202,7 +230,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val curSettings = settings.value
                 val apiKey = graph.prefs.getDecryptedGeminiApiKey()
 
-                // 1. Primary: Google AI Studio Brain (`0 MB` phone RAM) when API key is configured
                 if (apiKey.isNotBlank()) {
                     val vaultEntries = graph.vaultRepository.dialogues.value
                     val summaries = GeminiBrainClient.toVaultSummaries(vaultEntries) {
@@ -211,6 +238,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val aiResp = graph.geminiBrainClient.askWithTextOrAudio(
                         apiKey = apiKey,
                         userText = text,
+                        recentTurns = historyBeforeCurrent,
                         vaultDialogues = summaries,
                         preferMalayalam = curSettings.isMalayalamMode
                     )
@@ -220,7 +248,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                // 2. Automatic Offline Fallback (when API key is empty or phone has no internet)
                 runOfflineFallback(text, curSettings)
             } finally {
                 _isThinking.value = false
@@ -238,9 +265,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _chatHistory.value = (_chatHistory.value + ChatTurn(isUser = true, text = ai.heardTranscript)).takeLast(40)
         }
 
-        // Execute phone action if Gemini requested one (set_alarm, open_app, dial_call, add_todo)
+        // Execute structured phone action (silent background alarm with hour/minute, open app, dial, todo)
         if (ai.action.type.isNotBlank() && !ai.action.type.equals("none", ignoreCase = true)) {
-            graph.functionRouter.executeGeminiAction(ai.action.type, ai.action.value)
+            graph.functionRouter.executeGeminiAction(
+                type = ai.action.type,
+                value = ai.action.value,
+                hour = ai.action.hour,
+                minute = ai.action.minute,
+                label = ai.action.label
+            )
         }
 
         val replyText = ai.replyMalayalam.ifBlank {
@@ -252,6 +285,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val matchedDialogue = ai.playDialogueId?.let { targetId ->
             vaultEntries.firstOrNull { it.id == targetId && graph.vaultRepository.hasPlayableAudio(it) }
         }
+
+        val followUpCallback: (() -> Unit)? = if (ai.expectFollowUp && curSettings.hasGeminiApiKey) {
+            { startVadCapture() }
+        } else null
 
         var playedClipTitle: String? = null
         if (matchedDialogue != null) {
@@ -267,16 +304,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 ttsClient = graph.geminiTtsClient,
                                 voiceName = curSettings.geminiVoiceName,
                                 ttsStyle = ai.ttsStyle,
-                                preferMalayalam = curSettings.isMalayalamMode
+                                preferMalayalam = curSettings.isMalayalamMode,
+                                onFinished = followUpCallback
                             )
                         }
                     }
-                } else null
+                } else followUpCallback
             )
             if (played) playedClipTitle = matchedDialogue.title
         }
 
-        // Default: speak replyMalayalam via expressive Gemini TTS when no movie clip matched!
         if (playedClipTitle == null && curSettings.ttsVoiceRepliesEnabled) {
             graph.audioPlayer.speakNaturalReply(
                 text = replyText,
@@ -284,14 +321,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ttsClient = graph.geminiTtsClient,
                 voiceName = curSettings.geminiVoiceName,
                 ttsStyle = ai.ttsStyle,
-                preferMalayalam = curSettings.isMalayalamMode
+                preferMalayalam = curSettings.isMalayalamMode,
+                onFinished = followUpCallback
             )
+        } else if (playedClipTitle == null && followUpCallback != null) {
+            followUpCallback.invoke()
         }
 
         _chatHistory.value = (_chatHistory.value + ChatTurn(
             isUser = false,
             text = replyText,
-            badge = if (playedClipTitle != null) "Gemini + Clip" else "Gemini Voice",
+            badge = if (playedClipTitle != null) "Gemini + Clip" else "Gemini Stream",
             triggeredClipTitle = playedClipTitle
         )).takeLast(40)
     }
@@ -353,7 +393,158 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )).takeLast(40)
     }
 
-    // --- Google AI Studio Key, Voice & SMS Controls ---
+    // --- Easy "Add / Edit My Dialogue" Bottom Sheet + ✨ AI Auto-Listen ---
+
+    fun openAddDialogueSheet() {
+        _editorDraft.value = DialogueEditorDraft()
+    }
+
+    fun openEditDialogueSheet(entry: DialogueEntry) {
+        val appFlags = mutableSetOf<String>()
+        if (entry.recommendedApps.isEmpty()) {
+            appFlags.add("ALL")
+        } else {
+            if (entry.recommendedApps.any { it.contains("whatsapp") }) appFlags.add("WHATSAPP")
+            if (entry.recommendedApps.any { it.contains("messaging") || it.contains("mms") }) appFlags.add("SMS")
+            if (entry.recommendedApps.any { it.contains("gm") }) appFlags.add("GMAIL")
+            if (appFlags.isEmpty()) appFlags.add("ALL")
+        }
+        _editorDraft.value = DialogueEditorDraft(
+            existingId = entry.id,
+            title = entry.title,
+            heardText = entry.heardText,
+            category = entry.category,
+            situationsCsv = entry.situations.joinToString(", "),
+            triggerApps = appFlags,
+            fileName = entry.fileName,
+            audioUriString = entry.safUriString
+        )
+    }
+
+    fun closeDialogueEditor() {
+        graph.audioPlayer.stop()
+        _editorDraft.value = null
+    }
+
+    fun updateEditorDraft(transform: (DialogueEditorDraft) -> DialogueEditorDraft) {
+        _editorDraft.value?.let { cur -> _editorDraft.value = transform(cur) }
+    }
+
+    fun pickAudioIntoEditor(sourceUri: Uri) {
+        viewModelScope.launch {
+            val copied = graph.vaultRepository.copyExternalClipIntoVault(sourceUri)
+            if (copied == null) {
+                updateEditorDraft { it.copy(statusNote = "Could not copy selected audio file.") }
+                return@launch
+            }
+            updateEditorDraft { cur ->
+                cur.copy(
+                    fileName = copied.first,
+                    audioUriString = copied.second,
+                    title = cur.title.ifBlank {
+                        copied.first.substringBeforeLast('.').replace(Regex("[_-]+"), " ").trim()
+                    },
+                    statusNote = "✅ Audio ready (${copied.first}). Tap ✨ Auto-Listen or edit below!"
+                )
+            }
+        }
+    }
+
+    fun autoListenAndFillEditorWithAi() {
+        val draft = _editorDraft.value ?: return
+        if (draft.audioUriString.isBlank()) {
+            updateEditorDraft { it.copy(statusNote = "⚠️ Pick an audio clip first!") }
+            return
+        }
+        viewModelScope.launch {
+            updateEditorDraft { it.copy(isAutoTagging = true, statusNote = "✨ Listening to Malayalam clip with Gemini...") }
+            try {
+                val apiKey = graph.prefs.getDecryptedGeminiApiKey()
+                if (apiKey.isBlank()) {
+                    updateEditorDraft {
+                        it.copy(
+                            isAutoTagging = false,
+                            statusNote = "Add your free Google AI Studio API Key in Settings (⚙️) to enable AI Auto-Listen!"
+                        )
+                    }
+                    return@launch
+                }
+                val audioPayload = graph.vaultRepository.readAudioBytesForAi(draft.audioUriString, draft.fileName)
+                if (audioPayload == null) {
+                    updateEditorDraft { it.copy(isAutoTagging = false, statusNote = "Could not read audio clip bytes.") }
+                    return@launch
+                }
+                val tagged = graph.geminiBrainClient.autoTagAudioClipWithGemini(
+                    apiKey = apiKey,
+                    audioBytes = audioPayload.first,
+                    mimeType = audioPayload.second,
+                    fileName = draft.fileName
+                )
+                if (tagged != null) {
+                    updateEditorDraft { cur ->
+                        cur.copy(
+                            isAutoTagging = false,
+                            title = tagged.title.ifBlank { cur.title },
+                            heardText = tagged.heardText.ifBlank { cur.heardText },
+                            category = tagged.category,
+                            situationsCsv = tagged.situations.joinToString(", "),
+                            statusNote = "✨ AI heard the clip and filled name & trigger situations!"
+                        )
+                    }
+                } else {
+                    updateEditorDraft {
+                        it.copy(
+                            isAutoTagging = false,
+                            statusNote = "AI Auto-Listen failed (${graph.geminiBrainClient.lastDebugStatus.value}). You can type name & situations manually."
+                        )
+                    }
+                }
+            } finally {
+                updateEditorDraft { it.copy(isAutoTagging = false) }
+            }
+        }
+    }
+
+    fun saveEditorDraftToVault() {
+        val draft = _editorDraft.value ?: return
+        val cleanTitle = draft.title.trim().ifBlank { draft.fileName.substringBeforeLast('.').ifBlank { "My Malayalam Dialogue" } }
+        val situations = draft.situationsCsv.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        val appPackages = if ("ALL" in draft.triggerApps || draft.triggerApps.isEmpty()) {
+            emptyList()
+        } else {
+            buildList {
+                if ("WHATSAPP" in draft.triggerApps) {
+                    add("com.whatsapp"); add("com.whatsapp.w4b")
+                }
+                if ("SMS" in draft.triggerApps) {
+                    add("com.google.android.apps.messaging"); add("com.android.mms"); add("com.samsung.android.messaging")
+                }
+                if ("GMAIL" in draft.triggerApps) {
+                    add("com.google.android.gm")
+                }
+            }
+        }
+
+        val entry = DialogueEntry(
+            id = draft.existingId ?: UUID.randomUUID().toString(),
+            fileName = draft.fileName,
+            safUriString = draft.audioUriString,
+            title = cleanTitle,
+            heardText = draft.heardText.trim(),
+            category = draft.category,
+            situations = situations,
+            recommendedApps = appPackages
+        )
+
+        viewModelScope.launch {
+            val vec = graph.embeddingMatcher.computeDocumentEmbeddingIfInstalled(entry)
+            graph.vaultRepository.upsertDialogue(entry, vec)
+            _vaultBannerMessage.value = "✅ Saved '$cleanTitle' to My Dialogues!"
+            closeDialogueEditor()
+        }
+    }
+
+    // --- Google AI Studio Key, Voice, Keep-Alive, Live Monitor & SMS Controls ---
 
     fun saveGeminiApiKey(rawKey: String) {
         viewModelScope.launch {
@@ -365,9 +556,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun testGeminiApiKey(draftKey: String) {
         viewModelScope.launch {
             _geminiKeyTestResult.value = "Testing key with Google AI Studio..."
-            if (draftKey.isNotBlank()) {
-                graph.prefs.saveGeminiApiKey(draftKey)
-            }
+            if (draftKey.isNotBlank()) graph.prefs.saveGeminiApiKey(draftKey)
             val keyToTest = draftKey.trim().ifBlank { graph.prefs.getDecryptedGeminiApiKey() }
             val result = graph.geminiBrainClient.testApiKey(keyToTest)
             _geminiKeyTestResult.value = result.fold(
@@ -382,7 +571,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setSmsAutoReactEnabled(enabled: Boolean) {
-        viewModelScope.launch { graph.prefs.setSmsAutoReactEnabled(enabled) }
+        viewModelScope.launch {
+            graph.prefs.setSmsAutoReactEnabled(enabled)
+            if (enabled && settings.value.alwaysOnKeepAliveEnabled) {
+                AssistantKeepAliveService.syncServiceState(appContext, true)
+            }
+        }
+    }
+
+    fun setAlwaysOnKeepAliveEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            graph.prefs.setAlwaysOnKeepAliveEnabled(enabled)
+            AssistantKeepAliveService.syncServiceState(appContext, enabled)
+        }
+    }
+
+    fun simulateWhatsAppMessage(sampleText: String) {
+        val msg = sampleText.trim().ifBlank { "eda paisa ayachittund" }
+        viewModelScope.launch {
+            _whatsappSimStatus.value = "Simulating WhatsApp message: \"$msg\"..."
+            val note = graph.incomingMessageReactor.reactToIncoming(
+                source = "WhatsApp (Simulated)",
+                sourceKey = "sim_wa_${System.currentTimeMillis()}",
+                sender = "Friend",
+                messageText = msg,
+                appPackageHint = "com.whatsapp",
+                bypassCooldownAndGuards = true
+            )
+            _whatsappSimStatus.value = note ?: "No matching reaction (add an MP3 or Gemini API key)"
+        }
     }
 
     fun setSpeakAfterDialogueClip(enabled: Boolean) {
@@ -415,7 +632,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { graph.db.todoDao().deleteTodo(id) }
     }
 
-    // --- Dialogue Vault & 1-Tap Direct Audio Linking ---
+    // --- Dialogue Vault Helpers & Fixed Test Simulator ---
 
     fun bindSafFolder(uri: Uri) {
         viewModelScope.launch {
@@ -454,12 +671,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val unorganized = graph.vaultRepository.findUnorganizedAudioFiles(pendingNames)
             if (unorganized.isEmpty()) {
                 _vaultBannerMessage.value = if (settings.value.safTreeUri.isBlank()) {
-                    "Select a folder first, or tap '+ Add Dialogue' / '⚠️ Tap to pick MP3' on any card."
+                    "Tap '+ Add My Dialogue' to pick any MP3 directly, or choose a SAF backup folder."
                 } else {
                     "All audio clips in folder are already organized!"
                 }
             } else {
-                _vaultBannerMessage.value = "Queued ${unorganized.size} new audio clip(s) sequentially..."
+                _vaultBannerMessage.value = "Queued ${unorganized.size} new audio clip(s)..."
                 AudioAutoOrganizeWorker.enqueueSequentialClips(appContext, unorganized)
             }
         }
@@ -488,7 +705,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else null
             }.getOrNull()
             val finalVec = graph.embeddingMatcher.computeDocumentEmbeddingIfInstalled(entry) ?: cachedVec
-
             graph.vaultRepository.upsertDialogue(entry, finalVec)
             graph.db.pendingReviewDao().deleteById(item.id)
         }
@@ -524,23 +740,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { graph.db.pendingReviewDao().deleteById(id) }
     }
 
-    fun saveEditedDialogue(
-        entry: DialogueEntry,
-        newTitle: String,
-        newCategory: String,
-        newSituationsCsv: String
-    ) {
-        viewModelScope.launch {
-            val updated = entry.copy(
-                title = newTitle.trim().ifBlank { entry.title },
-                category = newCategory,
-                situations = newSituationsCsv.split(",").map { it.trim() }.filter { it.isNotBlank() }
-            )
-            val vec = graph.embeddingMatcher.computeDocumentEmbeddingIfInstalled(updated)
-            graph.vaultRepository.upsertDialogue(updated, vec)
-        }
-    }
-
     fun deleteDialogue(id: String) {
         viewModelScope.launch { graph.vaultRepository.deleteDialogue(id) }
     }
@@ -560,18 +759,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         graph.audioPlayer.stop()
     }
 
+    /**
+     * Fixed Test Simulator:
+     *  - Uses `GeminiBrainClient` when API key is configured (shows AI's chosen clip at #1 + reply!).
+     *  - Always ranks offline scores accurately via `EmbeddingMatcherEngine` (no stale `0.04` winners).
+     */
     fun runTestSimulator(testPhrase: String) {
         if (testPhrase.isBlank()) return
         viewModelScope.launch {
-            val top3 = graph.embeddingMatcher.rankDialogues(rawQuery = testPhrase, topK = 3)
-            _simulatorResults.value = top3
+            _simulatorAiNote.value = "Testing..."
+            val offlineTop3 = graph.embeddingMatcher.rankDialogues(rawQuery = testPhrase, topK = 3)
+            val apiKey = graph.prefs.getDecryptedGeminiApiKey()
+            val vaultEntries = graph.vaultRepository.dialogues.value
+
+            if (apiKey.isNotBlank()) {
+                val summaries = GeminiBrainClient.toVaultSummaries(vaultEntries) { true }
+                val ai = graph.geminiBrainClient.analyzeIncomingMessage(
+                    apiKey = apiKey,
+                    sender = "Simulator",
+                    source = "Test Simulator",
+                    messageText = testPhrase,
+                    vaultDialogues = summaries
+                )
+                if (ai != null) {
+                    val aiEntry = ai.playDialogueId?.let { id -> vaultEntries.firstOrNull { it.id == id } }
+                    val merged = if (aiEntry != null) {
+                        val aiWinner = MatchCandidate(aiEntry, 0.98f, usedNeuralEmbedding = true)
+                        (listOf(aiWinner) + offlineTop3.filterNot { it.entry.id == aiEntry.id }).take(3)
+                    } else {
+                        offlineTop3
+                    }
+                    _simulatorResults.value = merged
+                    _simulatorAiNote.value = if (aiEntry != null) {
+                        "✨ Gemini picked '${aiEntry.title}' • ${ai.replyMalayalam}"
+                    } else {
+                        "✨ Gemini reply: ${ai.replyMalayalam}"
+                    }
+                    if (aiEntry != null && graph.vaultRepository.hasPlayableAudio(aiEntry)) {
+                        graph.audioPlayer.playEntry(aiEntry)
+                    }
+                    return@launch
+                }
+            }
+
+            _simulatorResults.value = offlineTop3
             val threshold = settings.value.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
-            val winner = top3.firstOrNull()
+            val winner = offlineTop3.firstOrNull()
             if (winner != null && winner.score >= threshold) {
                 val played = graph.audioPlayer.playEntry(winner.entry)
-                if (!played) {
-                    _vaultBannerMessage.value = "Matched '${winner.entry.title}' (${String.format("%.2f", winner.score)}) — tap '⚠️ Tap to pick MP3' to attach audio!"
+                _simulatorAiNote.value = if (played) {
+                    "🔊 Played '${winner.entry.title}' (${String.format("%.2f", winner.score)})"
+                } else {
+                    "Matched '${winner.entry.title}' (${String.format("%.2f", winner.score)}) — tap '⚠️ Tap to pick MP3' to attach audio!"
                 }
+            } else {
+                _simulatorAiNote.value = "No match above ${String.format("%.2f", threshold)} (unrelated text stays silent)"
             }
         }
     }
@@ -619,7 +861,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         sourceKey = "gmail_test_${System.currentTimeMillis()}",
                         sender = header.from,
                         messageText = "${header.subject} ${header.snippet}",
-                        appPackageHint = "com.google.android.gm"
+                        appPackageHint = "com.google.android.gm",
+                        bypassCooldownAndGuards = true
                     )
                     _gmailTestResult.value = if (!reaction.isNullOrBlank()) {
                         "✅ Connected! Latest: \"${header.subject.take(40)}\" → $reaction"
@@ -636,9 +879,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // --- Optional Local Models & Settings ---
 
     fun downloadModel(model: ManagedModelId) {
-        viewModelScope.launch {
-            graph.modelDownloadManager.downloadModel(model, settings.value.hfAuthToken)
-        }
+        viewModelScope.launch { graph.modelDownloadManager.downloadModel(model, settings.value.hfAuthToken) }
     }
 
     fun importLocalModelFile(model: ManagedModelId, uri: Uri) {

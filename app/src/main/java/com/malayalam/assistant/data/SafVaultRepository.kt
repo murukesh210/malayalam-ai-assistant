@@ -133,38 +133,73 @@ class SafVaultRepository(
         }
 
     /**
-     * Copies an externally picked `.mp3`/`.wav`/`.ogg`/`.m4a` file into the SAF folder
-     * (or internal `vault_clips/` dir if SAF isn't configured yet) and returns `(fileName, uriString)`.
+     * Copies an externally picked `.mp3`/`.wav`/`.ogg`/`.m4a` file into app-private `filesDir/dialogues/`
+     * (so playback NEVER loses URI permission!) AND mirrors it into the SAF folder if configured.
+     * Returns `(fileName, localFileUriString)`.
      */
     suspend fun copyExternalClipIntoVault(sourceUri: Uri): Pair<String, String>? = withContext(Dispatchers.IO) {
         val rawName = queryDisplayName(sourceUri) ?: "clip_${System.currentTimeMillis()}.mp3"
         val safeName = sanitizeAudioFileName(rawName)
         val mime = guessAudioMime(safeName)
 
-        val treeUriStr = prefs.snapshot().safTreeUri
-        val treeDoc = resolveTreeDoc(treeUriStr)
-        if (treeDoc != null) {
-            ensureNoMedia(treeDoc)
-            val existing = treeDoc.findFile(safeName)
-            val targetDoc = existing ?: treeDoc.createFile(mime, safeName) ?: return@withContext null
-            context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                context.contentResolver.openOutputStream(targetDoc.uri, "wt")?.use { output ->
-                    input.copyTo(output, bufferSize = 16 * 1024)
+        // 1. Always save a permanent copy in app-private filesDir/dialogues/ (never loses permission!)
+        val privateDir = File(context.filesDir, "dialogues").apply { mkdirs() }
+        val privateDest = File(privateDir, safeName)
+        context.contentResolver.openInputStream(sourceUri)?.use { input ->
+            privateDest.outputStream().use { output ->
+                input.copyTo(output, bufferSize = 16 * 1024)
+            }
+        } ?: return@withContext null
+
+        // 2. Also sync a backup copy into user's SAF folder if configured
+        val treeDoc = resolveTreeDoc(prefs.snapshot().safTreeUri)
+        if (treeDoc != null && treeDoc.canWrite()) {
+            runCatching {
+                ensureNoMedia(treeDoc)
+                val existing = treeDoc.findFile(safeName)
+                val targetDoc = existing ?: treeDoc.createFile(mime, safeName)
+                if (targetDoc != null) {
+                    privateDest.inputStream().use { input ->
+                        context.contentResolver.openOutputStream(targetDoc.uri, "wt")?.use { output ->
+                            input.copyTo(output, bufferSize = 16 * 1024)
+                        }
+                    }
                 }
-            } ?: return@withContext null
-            return@withContext safeName to targetDoc.uri.toString()
-        } else {
-            val clipsDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "vault_clips").apply { mkdirs() }
-            File(clipsDir, ".nomedia").apply { if (!exists()) createNewFile() }
-            val dest = File(clipsDir, safeName)
-            context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                dest.outputStream().use { output ->
-                    input.copyTo(output, bufferSize = 16 * 1024)
-                }
-            } ?: return@withContext null
-            return@withContext safeName to Uri.fromFile(dest).toString()
+            }
         }
+
+        safeName to Uri.fromFile(privateDest).toString()
     }
+
+    /**
+     * Reads up to 2 MB of an audio clip for inline Gemini "✨ Auto-Listen & Fill with AI".
+     */
+    suspend fun readAudioBytesForAi(uriString: String, fileName: String): Pair<ByteArray, String>? =
+        withContext(Dispatchers.IO) {
+            val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return@withContext null
+            val bytes = runCatching {
+                val input = if (uri.scheme == "file") {
+                    File(uri.path ?: return@runCatching null).inputStream()
+                } else {
+                    context.contentResolver.openInputStream(uri)
+                }
+                input?.use { stream ->
+                    val maxBytes = 2 * 1024 * 1024 // 2 MB cap
+                    val out = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(16 * 1024)
+                    var total = 0
+                    while (total < maxBytes) {
+                        val r = stream.read(buf, 0, minOf(buf.size, maxBytes - total))
+                        if (r <= 0) break
+                        out.write(buf, 0, r)
+                        total += r
+                    }
+                    out.toByteArray()
+                }
+            }.getOrNull() ?: return@withContext null
+            if (bytes.isEmpty()) return@withContext null
+            bytes to guessAudioMime(fileName)
+        }
 
     suspend fun findUnorganizedAudioFiles(pendingFileNames: Set<String>): List<Pair<String, String>> =
         withContext(Dispatchers.IO) {

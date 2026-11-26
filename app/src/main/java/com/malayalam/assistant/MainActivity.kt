@@ -137,8 +137,13 @@ class MainActivity : ComponentActivity() {
                 val pendingReviews by viewModel.pendingReviews.collectAsState()
                 val pipelineProgress by viewModel.pipelineProgress.collectAsState()
                 val simulatorResults by viewModel.simulatorResults.collectAsState()
+                val simulatorAiNote by viewModel.simulatorAiNote.collectAsState()
                 val bannerMessage by viewModel.vaultBannerMessage.collectAsState()
+                val editorDraft by viewModel.editorDraft.collectAsState()
                 val geminiKeyTestResult by viewModel.geminiKeyTestResult.collectAsState()
+                val lastApiDebugStatus by viewModel.lastApiDebugStatus.collectAsState()
+                val liveMonitorLogs by viewModel.liveMonitorLogs.collectAsState()
+                val whatsappSimStatus by viewModel.whatsappSimStatus.collectAsState()
                 val gmailTestResult by viewModel.gmailTestResult.collectAsState()
                 val modelStates by viewModel.modelStates.collectAsState()
 
@@ -194,6 +199,12 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.OpenDocument()
                 ) { uri ->
                     if (uri != null) viewModel.addSingleClipFromPicker(uri)
+                }
+
+                val pickEditorAudioLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    if (uri != null) viewModel.pickAudioIntoEditor(uri)
                 }
 
                 val attachExistingAudioLauncher = rememberLauncherForActivityResult(
@@ -386,7 +397,7 @@ class MainActivity : ComponentActivity() {
                             titleHeader = if (destination == AppDestination.TEST_SIMULATOR) {
                                 "Test Simulator"
                             } else {
-                                "Dialogue Vault"
+                                "My Dialogues"
                             },
                             focusSimulatorFirst = destination == AppDestination.TEST_SIMULATOR,
                             safTreeUri = settings.safTreeUri,
@@ -396,25 +407,30 @@ class MainActivity : ComponentActivity() {
                             pipelineProgress = pipelineProgress,
                             playbackState = playbackState,
                             simulatorResults = simulatorResults,
+                            simulatorAiNote = simulatorAiNote,
                             matchThreshold = settings.matchThreshold,
                             bannerMessage = bannerMessage,
+                            editorDraft = editorDraft,
                             onBack = { destination = AppDestination.HOME_ORB },
+                            onOpenAddDialogueSheet = viewModel::openAddDialogueSheet,
+                            onOpenEditDialogueSheet = viewModel::openEditDialogueSheet,
+                            onCloseEditorSheet = viewModel::closeDialogueEditor,
+                            onUpdateEditorDraft = viewModel::updateEditorDraft,
+                            onPickAudioForEditor = { pickEditorAudioLauncher.launch(arrayOf("audio/*")) },
+                            onAutoListenEditorWithAi = viewModel::autoListenAndFillEditorWithAi,
+                            onSaveEditorDraft = viewModel::saveEditorDraftToVault,
                             onPickSafFolder = { safFolderLauncher.launch(null) },
-                            onAddDialogueFile = { addAudioLauncher.launch(arrayOf("audio/*")) },
                             onAttachMp3ToDialogue = { entry ->
                                 pendingAttachDialogueId = entry.id
                                 attachExistingAudioLauncher.launch(arrayOf("audio/*"))
                             },
                             onScanSafFolder = viewModel::scanAndAutoOrganizeSafFolder,
                             onPlayDialogue = viewModel::playDialogue,
-                            onPlayPendingUri = { item ->
-                                viewModel.playRawUri(item.safUriString, item.id, item.title, item.heardText)
-                            },
+                            onPlayRawUri = viewModel::playRawUri,
                             onStopAudio = viewModel::stopAudio,
                             onConfirmPending = viewModel::confirmPendingReview,
                             onAutoAcceptAllPending = viewModel::autoAcceptAllPendingReviews,
                             onDismissPending = viewModel::dismissPendingReview,
-                            onSaveEditedDialogue = viewModel::saveEditedDialogue,
                             onDeleteDialogue = viewModel::deleteDialogue,
                             onRunSimulator = viewModel::runTestSimulator
                         )
@@ -436,12 +452,22 @@ class MainActivity : ComponentActivity() {
                             isNotificationAccessEnabled = notifEnabled,
                             isSmsPermissionGranted = smsPermGranted,
                             geminiKeyTestResult = geminiKeyTestResult,
+                            lastApiDebugStatus = lastApiDebugStatus,
+                            liveMonitorLogs = liveMonitorLogs,
+                            whatsappSimStatus = whatsappSimStatus,
                             gmailTestResult = gmailTestResult,
                             onBack = { destination = AppDestination.HOME_ORB },
                             onSaveGeminiApiKey = viewModel::saveGeminiApiKey,
                             onTestGeminiApiKey = viewModel::testGeminiApiKey,
                             onSelectGeminiVoice = viewModel::setGeminiVoiceName,
                             onSetSpeakAfterClip = viewModel::setSpeakAfterDialogueClip,
+                            onToggleAlwaysOnKeepAlive = { enabled ->
+                                if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    runtimePermissionsLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                                }
+                                viewModel.setAlwaysOnKeepAliveEnabled(enabled)
+                            },
+                            onSimulateWhatsAppMessage = viewModel::simulateWhatsAppMessage,
                             onToggleSmsAutoReact = { enabled ->
                                 if (enabled && !hasSmsPermissions()) {
                                     smsPermissionsLauncher.launch(

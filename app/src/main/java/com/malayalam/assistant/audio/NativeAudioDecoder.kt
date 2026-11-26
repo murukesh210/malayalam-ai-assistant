@@ -13,7 +13,7 @@ import kotlin.math.abs
 
 data class DecodedPcmClip(
     val samples16kMono: FloatArray,
-    val sampleRate: Int = TARGET_SAMPLE_RATE,
+    val sampleRate: Int = NativeAudioDecoder.TARGET_SAMPLE_RATE,
     val originalDurationMs: Long
 )
 

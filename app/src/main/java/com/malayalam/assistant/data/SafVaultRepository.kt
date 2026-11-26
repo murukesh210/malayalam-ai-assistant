@@ -191,7 +191,7 @@ class SafVaultRepository(
         }.getOrNull()
     }
 
-    private fun loadFromSafOrFallback(treeDoc: DocumentFile) {
+    private suspend fun loadFromSafOrFallback(treeDoc: DocumentFile) {
         val dialoguesDoc = treeDoc.findFile(DIALOGUES_JSON_NAME)
         if (dialoguesDoc != null) {
             val raw = readDocText(dialoguesDoc.uri)

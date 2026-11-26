@@ -26,8 +26,8 @@ A lightweight, dark-themed, 100% offline Android Kotlin assistant (`minSdk 26`, 
 
 ## Building `app-debug.apk`
 
-- **GitHub Actions:** Push to GitHub or trigger `.github/workflows/build-apk.yml` (`Actions → Build Debug APK`) to compile and download the `app-debug` artifact.
-- **Local CLI (JDK 17 + Android SDK 35):**
+- **GitHub Actions:** Push to GitHub or trigger `.github/workflows/build-apk.yml` (`Actions → Build Debug APK`, running Temurin JDK 21 + Gradle 9.8.2 + AGP 9.4.1) to compile and download the `app-debug` artifact.
+- **Local CLI (JDK 21 + Android SDK 35):**
   ```bash
-  ./gradlew assembleDebug
+  ./gradlew assembleDebug --stacktrace
   ```

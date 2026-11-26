@@ -1,14 +1,13 @@
 #!/bin/sh
-# Lightweight Gradle Wrapper script (auto-bootstraps gradle-wrapper.jar if missing)
+# Lightweight Gradle Wrapper script (honors JAVA_HOME and gradle-wrapper.jar)
 APP_HOME=$( cd "${0%/*}" && pwd -P ) || exit
 WRAPPER_JAR="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
 if [ ! -f "$WRAPPER_JAR" ]; then
-    mkdir -p "$APP_HOME/gradle/wrapper"
-    WRAPPER_URL="https://raw.githubusercontent.com/gradle/gradle/v8.11.1/gradle/wrapper/gradle-wrapper.jar"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$WRAPPER_URL" -o "$WRAPPER_JAR"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "$WRAPPER_URL" -O "$WRAPPER_JAR"
+    if command -v gradle >/dev/null 2>&1; then
+        gradle wrapper --gradle-version 9.8.2 --no-daemon
+    else
+        echo "Error: gradle/wrapper/gradle-wrapper.jar is missing and 'gradle' is not on PATH." >&2
+        exit 1
     fi
 fi
 JAVACMD="java"

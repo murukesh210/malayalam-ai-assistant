@@ -1,13 +1,14 @@
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
-    id("org.jetbrains.kotlin.plugin.serialization")
-    id("com.google.devtools.ksp")
+    alias(libs.plugins.android.application)
+    // AGP 9.4.1 provides built-in Kotlin support; do NOT apply org.jetbrains.kotlin.android here.
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
 
 val sherpaLibsDir = file("libs")
@@ -20,9 +21,9 @@ val ensureSherpaOnnxAar by tasks.registering {
     doLast {
         sherpaLibsDir.mkdirs()
         val candidateUrls = listOf(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-2.0.3.aar",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.23/sherpa-onnx-1.12.23.aar",
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.20/sherpa-onnx-1.12.20.aar",
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-2.0.3.aar"
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.20/sherpa-onnx-1.12.20.aar"
         )
         var downloaded = false
         for (url in candidateUrls) {
@@ -95,10 +96,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -117,49 +114,54 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
     // Local AARs (sherpa-onnx Android AAR for offline IndicConformer Malayalam ASR)
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
 
-    // LiteRT-LM Kotlin SDK for EmbeddingGemma 2 (270M), FunctionGemma (270M), and Gemma 3 1B (CPU XNNPACK)
-    implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
+    // Pinned LiteRT-LM Kotlin SDK (0.18.0 — Java 25 bytecode / Kotlin 2.4 metadata supported by AGP 9.4.1 R8)
+    implementation(libs.litertlm.android)
 
     // Core AndroidX & Lifecycle (including SavedState + Lifecycle for VoiceInteractionSession Compose overlay)
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-service:2.8.7")
-    implementation("androidx.savedstate:savedstate-ktx:1.2.1")
-    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.service)
+    implementation(libs.androidx.savedstate.ktx)
+    implementation(libs.androidx.activity.compose)
 
     // Jetpack Compose + Material 3 (Lightweight Dark Gemini Theme)
-    val composeBom = platform("androidx.compose:compose-bom:2024.11.00")
-    implementation(composeBom)
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.extended)
 
     // Room Local Database (Offline To-Do list for FunctionGemma + Pending Dialogue Review queue)
-    val roomVersion = "2.6.1"
-    implementation("androidx.room:room-runtime:$roomVersion")
-    implementation("androidx.room:room-ktx:$roomVersion")
-    ksp("androidx.room:room-compiler:$roomVersion")
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
+    ksp(libs.kotlin.metadata.jvm)
 
     // WorkManager for Sequential Low-RAM Audio Auto-Listen Pipeline
-    implementation("androidx.work:work-runtime-ktx:2.10.0")
+    implementation(libs.androidx.work.runtime.ktx)
 
     // SAF DocumentFile + DataStore Preferences
-    implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation(libs.androidx.documentfile)
+    implementation(libs.androidx.datastore.preferences)
 
     // Coroutines, JSON Serialization & Streaming Model Downloader
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
 
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation(libs.androidx.compose.ui.tooling)
 }

@@ -154,6 +154,7 @@ class MainActivity : ComponentActivity() {
                 val pipelineProgress by viewModel.pipelineProgress.collectAsState()
                 val simulatorResults by viewModel.simulatorResults.collectAsState()
                 val simulatorAiNote by viewModel.simulatorAiNote.collectAsState()
+                val simulatorDiagnostic by viewModel.simulatorDiagnostic.collectAsState()
                 val bannerMessage by viewModel.vaultBannerMessage.collectAsState()
                 val packBannerMessage by viewModel.packBannerMessage.collectAsState()
                 val importedPackNeedingAiTagId by viewModel.importedPackNeedingAiTagId.collectAsState()
@@ -162,6 +163,7 @@ class MainActivity : ComponentActivity() {
                 val geminiKeyTestResult by viewModel.geminiKeyTestResult.collectAsState()
                 val lastApiDebugStatus by viewModel.lastApiDebugStatus.collectAsState()
                 val liveMonitorLogs by viewModel.liveMonitorLogs.collectAsState()
+                val diagnosticLogs by viewModel.diagnosticLogs.collectAsState()
                 val whatsappSimStatus by viewModel.whatsappSimStatus.collectAsState()
                 val gmailTestResult by viewModel.gmailTestResult.collectAsState()
                 val modelStates by viewModel.modelStates.collectAsState()
@@ -485,6 +487,7 @@ class MainActivity : ComponentActivity() {
                             playbackState = playbackState,
                             simulatorResults = simulatorResults,
                             simulatorAiNote = simulatorAiNote,
+                            simulatorDiagnostic = simulatorDiagnostic,
                             matchThreshold = settings.matchThreshold,
                             bannerMessage = bannerMessage,
                             editorDraft = editorDraft,
@@ -533,6 +536,7 @@ class MainActivity : ComponentActivity() {
                             geminiKeyTestResult = geminiKeyTestResult,
                             lastApiDebugStatus = lastApiDebugStatus,
                             liveMonitorLogs = liveMonitorLogs,
+                            diagnosticLogs = diagnosticLogs,
                             whatsappSimStatus = whatsappSimStatus,
                             gmailTestResult = gmailTestResult,
                             onBack = { destination = AppDestination.HOME_ORB },

@@ -102,6 +102,7 @@ fun DialogueVaultTab(
     playbackState: PlaybackState,
     simulatorResults: List<MatchCandidate>,
     simulatorAiNote: String,
+    simulatorDiagnostic: com.malayalam.assistant.ui.SimulatorDiagnosticUi?,
     matchThreshold: Float,
     bannerMessage: String,
     editorDraft: DialogueEditorDraft?,
@@ -205,6 +206,7 @@ fun DialogueVaultTab(
                                 onQueryChange = { simulatorQuery = it },
                                 simulatorResults = simulatorResults,
                                 simulatorAiNote = simulatorAiNote,
+                                simulatorDiagnostic = simulatorDiagnostic,
                                 playableAudioMap = playableAudioMap,
                                 matchThreshold = matchThreshold,
                                 onRunSimulator = onRunSimulator,
@@ -589,6 +591,7 @@ private fun SimulatorCardContent(
     onQueryChange: (String) -> Unit,
     simulatorResults: List<MatchCandidate>,
     simulatorAiNote: String,
+    simulatorDiagnostic: com.malayalam.assistant.ui.SimulatorDiagnosticUi?,
     playableAudioMap: Map<String, Boolean>,
     matchThreshold: Float,
     onRunSimulator: (String) -> Unit,
@@ -596,12 +599,41 @@ private fun SimulatorCardContent(
     onAttachMp3: (DialogueEntry) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
+        // 1-Tap Quick-Test Chips (Pure Malayalam + Manglish cross-lingual test cases)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                "എക്സാം പൊട്ടി",
+                "pareeksha potty",
+                "മാച്ച് തോറ്റു",
+                "എടാ പൈസ അയച്ചിട്ടുണ്ട്",
+                "എക്സാം പാസ്സായി"
+            ).forEach { chip ->
+                AssistChip(
+                    onClick = {
+                        onQueryChange(chip)
+                        onRunSimulator(chip)
+                    },
+                    label = { Text(chip, fontSize = 11.sp, maxLines = 1, softWrap = false) },
+                    colors = AssistChipDefaults.assistChipColors(
+                        containerColor = GeminiCard,
+                        labelColor = GeminiBlue
+                    )
+                )
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = simulatorQuery,
                 onValueChange = onQueryChange,
                 modifier = Modifier.weight(1f),
-                label = { Text("Type message / email", fontSize = 12.sp) },
+                label = { Text("Type Malayalam / Manglish / English", fontSize = 12.sp) },
                 singleLine = true
             )
             Spacer(Modifier.width(8.dp))
@@ -613,7 +645,36 @@ private fun SimulatorCardContent(
             }
         }
 
-        if (simulatorAiNote.isNotBlank()) {
+        if (simulatorDiagnostic != null) {
+            Spacer(Modifier.height(8.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(GeminiCard)
+                    .border(1.dp, GeminiViolet.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = "🧠 Understood Meaning: ${simulatorDiagnostic.understoodMeaning.ifBlank { "—" }}",
+                    color = GeminiTextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "🎬 Matched Dialogue: ${simulatorDiagnostic.matchedDialogueName}",
+                    color = GeminiMint,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "⏱ Latency: ${simulatorDiagnostic.latencyMs} ms  •  API: ${simulatorDiagnostic.apiStatus}",
+                    color = if (simulatorDiagnostic.apiStatus.contains("HTTP 4") || simulatorDiagnostic.apiStatus.contains("Network")) GeminiCoral else GeminiBlue,
+                    fontSize = 11.sp
+                )
+            }
+        } else if (simulatorAiNote.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
             Text(text = simulatorAiNote, color = GeminiMint, fontSize = 12.sp)
         }

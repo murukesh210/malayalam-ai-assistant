@@ -52,6 +52,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.malayalam.assistant.ai.ApiDiagnosticEvent
 import com.malayalam.assistant.ai.ManagedModelId
 import com.malayalam.assistant.ai.ModelInstallState
 import com.malayalam.assistant.ai.RamStatus
@@ -95,6 +96,7 @@ fun ModelsAndSettingsTab(
     geminiKeyTestResult: String,
     lastApiDebugStatus: String,
     liveMonitorLogs: List<LiveNotificationLogEntry>,
+    diagnosticLogs: List<ApiDiagnosticEvent>,
     whatsappSimStatus: String,
     gmailTestResult: String,
     onBack: () -> Unit,
@@ -410,6 +412,67 @@ fun ModelsAndSettingsTab(
                                 )
                                 Text(text = log.messagePreview, color = GeminiTextPrimary, fontSize = 12.sp)
                                 Text(text = log.actionTaken, color = GeminiMint, fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Live AI & Connection Log (Last ${diagnosticLogs.size} / 20 Calls):",
+                        color = GeminiViolet,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    if (diagnosticLogs.isEmpty()) {
+                        Text(
+                            text = "No Gemini API calls logged yet — speak to the orb or run a Simulator test.",
+                            color = GeminiTextSecondary,
+                            fontSize = 11.sp
+                        )
+                    } else {
+                        diagnosticLogs.forEach { ev ->
+                            val isErr = ev.errorMessage.isNotBlank() || (ev.httpCode != 0 && ev.httpCode !in 200..299)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(GeminiCard)
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    text = "[${ev.timestamp}] ${ev.source} • HTTP ${ev.httpCode} • ${ev.latencyMs}ms",
+                                    color = if (isErr) GeminiCoral else GeminiMint,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "In: ${ev.inputText}",
+                                    color = GeminiTextPrimary,
+                                    fontSize = 11.sp
+                                )
+                                if (ev.understoodMeaning.isNotBlank()) {
+                                    Text(
+                                        text = "Meaning: ${ev.understoodMeaning}",
+                                        color = GeminiBlue,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                if (!ev.matchedDialogueId.isNullOrBlank()) {
+                                    Text(
+                                        text = "Matched ID: ${ev.matchedDialogueId}",
+                                        color = GeminiMint,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                if (ev.errorMessage.isNotBlank()) {
+                                    Text(
+                                        text = "Error: ${ev.errorMessage}",
+                                        color = GeminiCoral,
+                                        fontSize = 11.sp
+                                    )
+                                }
                             }
                         }
                     }

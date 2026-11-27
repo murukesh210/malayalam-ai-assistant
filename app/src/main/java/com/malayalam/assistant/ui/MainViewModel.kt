@@ -57,6 +57,13 @@ data class DialogueEditorDraft(
     val statusNote: String = ""
 )
 
+data class SimulatorDiagnosticUi(
+    val understoodMeaning: String,
+    val matchedDialogueName: String,
+    val latencyMs: Long,
+    val apiStatus: String
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val graph = AppGraph.from(application)
@@ -74,6 +81,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val modelStates = graph.modelDownloadManager.states
     val lastApiDebugStatus = graph.geminiBrainClient.lastDebugStatus
     val liveMonitorLogs = graph.incomingMessageReactor.liveMonitorLogs
+    val diagnosticLogs = com.malayalam.assistant.ai.DiagnosticLogStore.events
 
     val playableAudioMap: StateFlow<Map<String, Boolean>> = dialogues
         .map { list ->
@@ -120,6 +128,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _simulatorAiNote = MutableStateFlow("")
     val simulatorAiNote: StateFlow<String> = _simulatorAiNote.asStateFlow()
 
+    private val _simulatorDiagnostic = MutableStateFlow<SimulatorDiagnosticUi?>(null)
+    val simulatorDiagnostic: StateFlow<SimulatorDiagnosticUi?> = _simulatorDiagnostic.asStateFlow()
+
     private val _vaultBannerMessage = MutableStateFlow("")
     val vaultBannerMessage: StateFlow<String> = _vaultBannerMessage.asStateFlow()
 
@@ -144,10 +155,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _editorDraft = MutableStateFlow<DialogueEditorDraft?>(null)
     val editorDraft: StateFlow<DialogueEditorDraft?> = _editorDraft.asStateFlow()
 
-    // Continuous Hands-Free Gemini-Live Conversation Controller
+    // Continuous Hands-Free Gemini-Live Conversation Controller (with 15s Watchdog Recovery)
     private val continuousVoiceController = ContinuousVoiceController(
         scope = viewModelScope,
         audioPlayer = graph.audioPlayer,
+        onTimeoutOrError = { shortReason ->
+            _heroGreetingOrReply.value = shortReason
+        },
         onProcessCapturedWav = { wavBytes, onPlaybackFinished ->
             processCapturedWavTurn(wavBytes, onPlaybackFinished)
         }
@@ -323,7 +337,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _heroGreetingOrReply.value = replyText
 
         val vaultEntries = graph.voicePackRepository.activeDialogues.value
-        val matchedDialogue = ai.playDialogueId?.let { targetId ->
+        val matchedDialogue = ai.resolvedDialogueId?.let { targetId ->
             vaultEntries.firstOrNull { it.id == targetId && graph.voicePackRepository.hasPlayableAudio(it) }
         }
         val activeVoice = activePack.ttsVoice.ifBlank { curSettings.geminiVoiceName }
@@ -872,57 +886,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun runTestSimulator(testPhrase: String) {
         if (testPhrase.isBlank()) return
         viewModelScope.launch {
-            _simulatorAiNote.value = "Testing..."
-            val activePack = graph.voicePackRepository.getActivePackMeta()
+            _simulatorAiNote.value = "Testing via live notification pipeline..."
+            _simulatorDiagnostic.value = null
             val activeEntries = graph.voicePackRepository.activeDialogues.value
             val offlineTop3 = graph.embeddingMatcher.rankDialogues(
                 rawQuery = testPhrase,
                 overrideDialogues = activeEntries,
                 topK = 3
             )
-            val apiKey = graph.prefs.getDecryptedGeminiApiKey()
 
-            if (apiKey.isNotBlank()) {
-                val summaries = GeminiBrainClient.toVaultSummaries(activeEntries) { true }
-                val ai = graph.geminiBrainClient.analyzeIncomingMessage(
-                    apiKey = apiKey,
-                    sender = "Simulator",
-                    source = "Test Simulator",
-                    messageText = testPhrase,
-                    vaultDialogues = summaries,
-                    packPersonaInstruction = activePack.personaInstruction
+            // Execute the EXACT same IncomingMessageReactor + GeminiBrainClient path used by live WhatsApp notifications!
+            val outcome = graph.incomingMessageReactor.reactToIncomingDetailed(
+                source = "Test Simulator",
+                sourceKey = "sim_${System.currentTimeMillis()}",
+                sender = "WhatsApp Test",
+                messageText = testPhrase,
+                appPackageHint = "com.whatsapp",
+                bypassCooldownAndGuards = true
+            )
+
+            if (outcome != null) {
+                val aiEntry = outcome.matchedDialogue
+                val merged = if (aiEntry != null) {
+                    val aiWinner = MatchCandidate(aiEntry, 0.99f, usedNeuralEmbedding = true)
+                    (listOf(aiWinner) + offlineTop3.filterNot { it.entry.id == aiEntry.id }).take(3)
+                } else offlineTop3
+
+                _simulatorResults.value = merged
+                _simulatorAiNote.value = outcome.actionTaken
+                _simulatorDiagnostic.value = SimulatorDiagnosticUi(
+                    understoodMeaning = outcome.understoodMeaning.ifBlank { "—" },
+                    matchedDialogueName = aiEntry?.title ?: if (outcome.replyMalayalam.isNotBlank()) "TTS Reply: ${outcome.replyMalayalam.take(50)}" else "None",
+                    latencyMs = outcome.latencyMs,
+                    apiStatus = outcome.apiStatus
                 )
-                if (ai != null) {
-                    val aiEntry = ai.playDialogueId?.let { id -> activeEntries.firstOrNull { it.id == id } }
-                    val merged = if (aiEntry != null) {
-                        val aiWinner = MatchCandidate(aiEntry, 0.98f, usedNeuralEmbedding = true)
-                        (listOf(aiWinner) + offlineTop3.filterNot { it.entry.id == aiEntry.id }).take(3)
-                    } else offlineTop3
-                    _simulatorResults.value = merged
-                    _simulatorAiNote.value = if (aiEntry != null) {
-                        "✨ Gemini picked '${aiEntry.title}' • ${ai.replyMalayalam}"
-                    } else {
-                        "✨ Gemini reply: ${ai.replyMalayalam}"
-                    }
-                    if (aiEntry != null && graph.voicePackRepository.hasPlayableAudio(aiEntry)) {
-                        graph.audioPlayer.playEntry(aiEntry)
-                    }
-                    return@launch
-                }
-            }
-
-            _simulatorResults.value = offlineTop3
-            val threshold = settings.value.matchThreshold.coerceAtLeast(EmbeddingMatcherEngine.MIN_SAFE_THRESHOLD)
-            val winner = offlineTop3.firstOrNull()
-            if (winner != null && winner.score >= threshold) {
-                val played = graph.audioPlayer.playEntry(winner.entry)
-                _simulatorAiNote.value = if (played) {
-                    "🔊 Played '${winner.entry.title}' (${String.format("%.2f", winner.score)})"
-                } else {
-                    "Matched '${winner.entry.title}' (${String.format("%.2f", winner.score)}) — attach MP3!"
-                }
             } else {
-                _simulatorAiNote.value = "No match above ${String.format("%.2f", threshold)} (unrelated/opposite stays silent)"
+                _simulatorResults.value = offlineTop3
+                _simulatorAiNote.value = "No reaction triggered."
+                _simulatorDiagnostic.value = SimulatorDiagnosticUi(
+                    understoodMeaning = "No match / skipped",
+                    matchedDialogueName = "None",
+                    latencyMs = 0L,
+                    apiStatus = graph.geminiBrainClient.lastDebugStatus.value
+                )
             }
         }
     }

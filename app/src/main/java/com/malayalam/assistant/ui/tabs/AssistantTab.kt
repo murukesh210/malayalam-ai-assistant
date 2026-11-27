@@ -130,7 +130,7 @@ fun MinimalVoiceHomeScreen(
         voiceSessionState == VoiceSessionState.LISTENING || isFallbackMicListening ->
             if (speechLocale.startsWith("ml")) "കേൾക്കുന്നു..." else "Listening..."
         isThinkingOrb ->
-            if (speechLocale.startsWith("ml")) "ചിന്തിക്കുന്നു..." else "Thinking..."
+            if (speechLocale.startsWith("ml")) "കേട്ടു, ചിന്തിക്കുന്നു..." else "Heard, thinking..."
         playbackState.isPlaying ->
             playbackState.activeTitle.ifBlank { heroText }
         else -> heroText

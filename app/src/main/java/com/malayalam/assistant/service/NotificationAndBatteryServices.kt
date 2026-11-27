@@ -104,8 +104,9 @@ class DialogueNotificationListenerService : NotificationListenerService() {
         if ((flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
 
         val (sender, body) = extractMessagingOrStandardText(notification)
+        // Preserve full UTF-8 Malayalam Unicode (\u0D00-\u0D7F) without ASCII word-boundary stripping
         val cleanBody = body.trim()
-        if (cleanBody.length < 2) return
+        if (cleanBody.isBlank()) return
 
         val notifKey = sbn.key ?: pkg
         val appLabel = friendlyAppLabel(pkg)

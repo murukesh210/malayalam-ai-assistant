@@ -70,8 +70,8 @@ class SmartVoiceRecorder {
         val frameSamples = 320 // 20 ms at 16 kHz
         val shortBuf = ShortArray(frameSamples)
         val pcm8kOut = ByteArrayOutputStream(32 * 1024)
-        // 360 ms pre-roll (18 frames of 20 ms) so opening syllables are never clipped
-        val preRollFrames = ArrayDeque<ByteArray>(20)
+        // 400 ms pre-roll ring buffer (20 frames of 20 ms) so opening Malayalam syllables are NEVER clipped
+        val preRollFrames = ArrayDeque<ByteArray>(PRE_ROLL_FRAMES + 2)
 
         var speechDetected = false
         var initialCalibrationSum = 0.0
@@ -178,7 +178,7 @@ class SmartVoiceRecorder {
     }
 
     private fun pushPreRoll(queue: ArrayDeque<ByteArray>, frame: ByteArray) {
-        if (queue.size >= 18) queue.removeFirst()
+        if (queue.size >= PRE_ROLL_FRAMES) queue.removeFirst()
         queue.addLast(frame)
     }
 
@@ -206,6 +206,7 @@ class SmartVoiceRecorder {
         const val CAPTURE_SAMPLE_RATE = 16_000
         const val UPLOAD_SAMPLE_RATE = 8_000
         private const val FRAME_MS = 20L
+        private const val PRE_ROLL_FRAMES = 20 // 20 * 20 ms = 400 ms pre-roll ring buffer
         private const val CALIBRATION_MS = 350L
         private const val MIN_SPEECH_ONSET_MS = 180L
         private const val MIN_SPEECH_DURATION_MS = 350L

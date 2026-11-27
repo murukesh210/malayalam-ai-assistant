@@ -332,7 +332,7 @@ class AssistantVoiceInteractionSession(context: Context) :
                     val replyText = ai.replyMalayalam.ifBlank { if (ml) "ശരി!" else "Done!" }
                     uiState.value = uiState.value.copy(isThinking = false, assistantResponse = replyText)
 
-                    val matchedClip = ai.playDialogueId?.let { id ->
+                    val matchedClip = ai.resolvedDialogueId?.let { id ->
                         packDialogues.firstOrNull { it.id == id && graph.vaultRepository.hasPlayableAudio(it) }
                     }
                     val playedClip = matchedClip?.let { graph.audioPlayer.playEntry(it) } == true

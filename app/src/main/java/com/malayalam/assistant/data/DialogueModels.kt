@@ -25,11 +25,11 @@ enum class SituationCategory(val id: String, val displayLabel: String) {
 
 @Serializable
 data class DialogueEntry(
-    val id: String,
-    val fileName: String,
-    val safUriString: String,
-    val title: String,
-    val heardText: String,
+    val id: String = "",
+    val fileName: String = "",
+    val safUriString: String = "",
+    val title: String = "",
+    val heardText: String = "",
     val category: String = SituationCategory.CUSTOM.id,
     val situations: List<String> = emptyList(),
     val recommendedApps: List<String> = emptyList(),

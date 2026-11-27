@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -24,8 +25,9 @@ import java.util.zip.ZipOutputStream
  *    so zero previously linked MP3s are ever lost.
  *  - Supports switching to any single pack OR `"__ALL_PACKS__"` (`All Packs Combined`).
  *  - Imports standard `.zip` / `.mlpack` archives via `java.util.zip.ZipInputStream` (zero extra deps!)
- *    and exports any pack into a portable `.mlpack.zip`.
+ *    accepting BOTH portable (`name`, `audioFile`, `whenToPlay`, `specificity`, `apps`) and exported schemas.
  */
+@OptIn(ExperimentalSerializationApi::class)
 class VoicePackRepository(
     private val context: Context,
     private val prefs: AppPreferences,
@@ -34,6 +36,9 @@ class VoicePackRepository(
     private val mutex = Mutex()
     private val json = Json {
         ignoreUnknownKeys = true
+        isLenient = true
+        coerceInputValues = true
+        explicitNulls = false
         prettyPrint = true
         encodeDefaults = true
     }
@@ -257,7 +262,8 @@ class VoicePackRepository(
         var manifestEntryParentPrefix = ""
         val extractedAudioFiles = mutableListOf<File>()
         val audioByNormalizedRelPath = mutableMapOf<String, File>()
-        val audioByBaseName = mutableMapOf<String, File>()
+        val audioByExactBaseName = mutableMapOf<String, File>()
+        val audioByBaseNameLower = mutableMapOf<String, File>()
         val usedOutNames = mutableSetOf<String>()
 
         try {
@@ -297,8 +303,10 @@ class VoicePackRepository(
                                     outFile.outputStream().use { out -> zis.copyTo(out, bufferSize = 16 * 1024) }
                                     extractedAudioFiles.add(outFile)
                                     audioByNormalizedRelPath[rawEntryPath.lowercase()] = outFile
-                                    audioByBaseName.putIfAbsent(lowerName, outFile)
-                                    audioByBaseName.putIfAbsent(safeName.lowercase(), outFile)
+                                    audioByExactBaseName.putIfAbsent(entryFileName, outFile)
+                                    audioByExactBaseName.putIfAbsent(safeName, outFile)
+                                    audioByBaseNameLower.putIfAbsent(lowerName, outFile)
+                                    audioByBaseNameLower.putIfAbsent(safeName.lowercase(), outFile)
                                 }
                             }
                         }
@@ -312,7 +320,7 @@ class VoicePackRepository(
                 throw IllegalArgumentException("No pack.json or supported audio clips (.mp3/.wav/.ogg/.m4a) found in ZIP.")
             }
 
-            // Build secondary relative-path map stripped of the folder-wrapped root prefix (e.g. "Mammootty_Pack/")
+            // Build secondary relative-path map stripped of any folder-wrapped root prefix (e.g. "Mammootty_Pack/")
             val audioByRootStrippedPath = mutableMapOf<String, File>()
             val prefixLower = manifestEntryParentPrefix.lowercase()
             for ((rel, file) in audioByNormalizedRelPath) {
@@ -322,10 +330,10 @@ class VoicePackRepository(
                 audioByRootStrippedPath[stripped] = file
             }
 
-            val parsedManifest: VoicePack? = manifestJsonText?.let { raw ->
-                runCatching { json.decodeFromString<VoicePack>(raw.trimStart('\uFEFF')) }
+            val parsedDto: ImportPackDto? = manifestJsonText?.let { raw ->
+                runCatching { json.decodeFromString<ImportPackDto>(raw.trimStart('\uFEFF')) }
                     .getOrElse { parseErr ->
-                        throw IllegalArgumentException("Invalid pack.json: ${parseErr.message?.take(70) ?: "malformed JSON"}")
+                        throw IllegalArgumentException("Invalid pack.json: ${parseErr.message?.take(90) ?: "malformed JSON"}")
                     }
             }
 
@@ -333,30 +341,67 @@ class VoicePackRepository(
             val missingManifest: Boolean
             val linkedAudioCount: Int
 
-            if (parsedManifest != null) {
+            if (parsedDto != null) {
                 missingManifest = false
                 var linked = 0
-                val linkedDialogues = parsedManifest.dialogues.map { d ->
-                    val rawRef = d.fileName.replace('\\', '/').trimStart('/')
-                    val rawRefLower = rawRef.lowercase()
-                    val baseName = rawRef.substringAfterLast('/').lowercase()
-                    val sanitizedBase = sanitizeAudioName(baseName).lowercase()
+                val linkedDialogues = parsedDto.dialogues.mapIndexed { idx, d ->
+                    val rawAudioRef = d.fileName.ifBlank { d.audioFile }.ifBlank { d.audio }
+                        .replace('\\', '/')
+                        .trimStart('/')
+                    val rawRefLower = rawAudioRef.lowercase()
+                    val baseNameExact = rawAudioRef.substringAfterLast('/')
+                    val baseNameLower = baseNameExact.lowercase()
+                    val sanitizedBaseLower = if (baseNameExact.isNotBlank()) sanitizeAudioName(baseNameExact).lowercase() else ""
 
-                    val matchedFile = audioByRootStrippedPath[rawRefLower]
-                        ?: audioByRootStrippedPath["audio/$baseName"]
-                        ?: audioByNormalizedRelPath[rawRefLower]
-                        ?: audioByBaseName[baseName]
-                        ?: audioByBaseName[sanitizedBase]
+                    // Priority: exact relative path -> root-stripped relative path -> audio/<base> -> exact base filename -> case-insensitive base filename
+                    val matchedFile = if (rawRefLower.isNotBlank()) {
+                        audioByRootStrippedPath[rawRefLower]
+                            ?: audioByNormalizedRelPath[rawRefLower]
+                            ?: audioByRootStrippedPath["audio/$baseNameLower"]
+                            ?: audioByExactBaseName[baseNameExact]
+                            ?: audioByBaseNameLower[baseNameLower]
+                            ?: audioByBaseNameLower[sanitizedBaseLower]
+                    } else null
 
-                    if (matchedFile != null) {
-                        linked++
-                        d.copy(fileName = matchedFile.name, safUriString = Uri.fromFile(matchedFile).toString())
-                    } else d
+                    if (matchedFile != null) linked++
+
+                    val resolvedFileName = matchedFile?.name ?: baseNameExact
+                    val fallbackTitle = resolvedFileName.substringBeforeLast('.').replace(Regex("[_-]+"), " ").trim()
+                    val resolvedTitle = d.title.ifBlank { d.name }.ifBlank { fallbackTitle }.ifBlank { "Dialogue ${idx + 1}" }
+                    val resolvedScope = d.specificity.ifBlank { d.scope }.lowercase().let {
+                        if (it == "broad") "broad" else "specific"
+                    }
+                    val resolvedApps = when {
+                        d.apps.isNotEmpty() -> d.apps
+                        d.recommendedApps.isNotEmpty() -> d.recommendedApps
+                        else -> listOf("*")
+                    }
+
+                    DialogueEntry(
+                        id = d.id.ifBlank { UUID.randomUUID().toString() },
+                        fileName = resolvedFileName,
+                        safUriString = matchedFile?.let { Uri.fromFile(it).toString() } ?: "",
+                        title = resolvedTitle,
+                        heardText = d.heardText.ifBlank { d.dialogue },
+                        category = SituationCategory.fromId(d.category).id,
+                        situations = d.resolvedSituations(),
+                        recommendedApps = resolvedApps,
+                        scope = resolvedScope,
+                        durationMs = d.durationMs
+                    )
                 }
                 linkedAudioCount = linked
-                finalPack = parsedManifest.copy(
+                val resolvedPackName = parsedDto.packName.ifBlank { parsedDto.name }.ifBlank { cleanBaseName }
+                val resolvedVoice = parsedDto.ttsVoice.ifBlank { parsedDto.voice }.ifBlank { prefs.snapshot().geminiVoiceName }
+                val resolvedPersona = parsedDto.personaInstruction.ifBlank { parsedDto.persona }
+                    .ifBlank { "Witty Malayalam style inspired by $resolvedPackName." }
+
+                finalPack = VoicePack(
                     packId = tempId,
-                    packName = parsedManifest.packName.ifBlank { cleanBaseName },
+                    packName = resolvedPackName,
+                    actor = parsedDto.actor.ifBlank { resolvedPackName },
+                    ttsVoice = resolvedVoice,
+                    personaInstruction = resolvedPersona,
                     dialogues = linkedDialogues,
                     updatedAtEpochMs = System.currentTimeMillis()
                 )

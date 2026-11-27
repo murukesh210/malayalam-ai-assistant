@@ -134,13 +134,13 @@ fun VoicePacksScreen(
                 ) {
                     Button(
                         onClick = onImportPackZip,
-                        modifier = Modifier.weight(1.3f),
+                        modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(containerColor = GeminiBlue)
                     ) {
                         Icon(Icons.Default.FileUpload, contentDescription = null, tint = Color(0xFF071324), modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = "Import (.zip / .mlpack)",
+                            text = "Import Pack",
                             color = Color(0xFF071324),
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 12.sp,

@@ -82,6 +82,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val lastApiDebugStatus = graph.geminiBrainClient.lastDebugStatus
     val liveMonitorLogs = graph.incomingMessageReactor.liveMonitorLogs
     val diagnosticLogs = com.malayalam.assistant.ai.DiagnosticLogStore.events
+    val isAssistantEnabled: StateFlow<Boolean> = graph.prefs.isAssistantEnabledFlow
+
+    private var activeChatJob: kotlinx.coroutines.Job? = null
 
     val playableAudioMap: StateFlow<Map<String, Boolean>> = dialogues
         .map { list ->
@@ -181,12 +184,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun resetGreetingToNamaskaram() {
+        if (!graph.prefs.isAssistantEnabledNow) {
+            _heroGreetingOrReply.value = "അസിസ്റ്റന്റ് ഓഫ് ആണ്"
+            return
+        }
         _heroGreetingOrReply.value = if (settings.value.isMalayalamMode) "നമസ്കാരം" else "Namaskaram"
+    }
+
+    // --- Persistent Master Power Switch (ON / OFF) ---
+
+    fun toggleMasterAssistantPower() {
+        val nextEnabled = !graph.prefs.isAssistantEnabledNow
+        setMasterAssistantPower(nextEnabled)
+    }
+
+    fun setMasterAssistantPower(enabled: Boolean) {
+        // Flip synchronous volatile flag FIRST so all background listeners see the new state in 0ms
+        graph.prefs.setAssistantEnabledInstantFlag(enabled)
+
+        if (!enabled) {
+            // 1. Immediately stop continuous mic & cancel in-flight Gemini Brain / Streaming TTS jobs
+            continuousVoiceController.stopSession()
+            activeChatJob?.cancel()
+            activeChatJob = null
+            _isThinkingTyped.value = false
+            graph.geminiTtsClient.cancelStreaming()
+            com.malayalam.assistant.ai.SharedGeminiHttp.cancelAllInFlightCalls()
+
+            // 2. Immediately stop and release DialogueAudioPlayer so no clip or TTS keeps speaking
+            graph.audioPlayer.releaseAndReset()
+
+            // 3. Stop AssistantKeepAliveService (dismissing FGS notification) & pause GmailDirectWatcher
+            AssistantKeepAliveService.syncServiceState(appContext, false)
+            GmailDirectWatcherService.syncServiceState(appContext, false)
+
+            _heroGreetingOrReply.value = "അസിസ്റ്റന്റ് ഓഫ് ആണ്"
+
+            viewModelScope.launch {
+                graph.prefs.setAssistantEnabled(false)
+            }
+        } else {
+            // Restore normal glowing orb greeting & resume previously enabled background services seamlessly
+            _heroGreetingOrReply.value = if (settings.value.isMalayalamMode) "നമസ്കാരം" else "Namaskaram"
+            viewModelScope.launch {
+                graph.prefs.setAssistantEnabled(true)
+                val cur = graph.prefs.snapshot()
+                if (cur.backgroundModeActive) {
+                    AssistantKeepAliveService.syncServiceState(appContext, true)
+                }
+                if (cur.gmailWatcherEnabled && cur.gmailAddress.isNotBlank()) {
+                    GmailDirectWatcherService.syncServiceState(appContext, true)
+                }
+            }
+        }
     }
 
     // --- Continuous Live Mode & Barge-In ---
 
     fun onLiveOrbTapped() {
+        if (!graph.prefs.isAssistantEnabledNow) return
         continuousVoiceController.onOrbTapped(continuousMode = settings.value.continuousLiveMode)
     }
 
@@ -202,6 +258,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // --- One-Tap Background Mode (mediaPlayback FGS) ---
 
     fun toggleBackgroundMode() {
+        if (!graph.prefs.isAssistantEnabledNow) return
         val nextActive = !settings.value.backgroundModeActive
         if (nextActive) {
             // Stop foreground continuous mic before entering background listener mode
@@ -258,6 +315,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendChatOrAction(rawInput: String) {
+        if (!graph.prefs.isAssistantEnabledNow) return
         val text = rawInput.trim()
         if (text.isBlank() || _isThinkingTyped.value) return
 
@@ -265,7 +323,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _chatHistory.value = (_chatHistory.value + ChatTurn(isUser = true, text = text)).takeLast(40)
         _isThinkingTyped.value = true
 
-        viewModelScope.launch {
+        activeChatJob?.cancel()
+        activeChatJob = viewModelScope.launch {
             try {
                 val curSettings = settings.value
                 val apiKey = graph.prefs.getDecryptedGeminiApiKey()
@@ -740,11 +799,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             graph.prefs.setBackgroundModeActive(enabled)
             graph.prefs.setAlwaysOnKeepAliveEnabled(enabled)
-            AssistantKeepAliveService.syncServiceState(appContext, enabled)
+            AssistantKeepAliveService.syncServiceState(appContext, enabled && graph.prefs.isAssistantEnabledNow)
         }
     }
 
     fun simulateWhatsAppMessage(sampleText: String) {
+        if (!graph.prefs.isAssistantEnabledNow) {
+            _whatsappSimStatus.value = "⏸ Assistant is OFF — tap ON on the Home screen first."
+            return
+        }
         val msg = sampleText.trim().ifBlank { "eda paisa ayachittund" }
         viewModelScope.launch {
             _whatsappSimStatus.value = "Simulating WhatsApp message: \"$msg\"..."
@@ -937,7 +1000,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             graph.prefs.saveGmailCredentials(email, appPasswordInput)
             _gmailTestResult.value = "Saved Gmail credentials securely."
-            if (settings.value.gmailWatcherEnabled) {
+            if (settings.value.gmailWatcherEnabled && graph.prefs.isAssistantEnabledNow) {
                 GmailDirectWatcherService.syncServiceState(appContext, true)
             }
         }
@@ -946,7 +1009,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setGmailWatcherEnabled(enabled: Boolean) {
         viewModelScope.launch {
             graph.prefs.setGmailWatcherEnabled(enabled)
-            GmailDirectWatcherService.syncServiceState(appContext, enabled)
+            GmailDirectWatcherService.syncServiceState(appContext, enabled && graph.prefs.isAssistantEnabledNow)
         }
     }
 

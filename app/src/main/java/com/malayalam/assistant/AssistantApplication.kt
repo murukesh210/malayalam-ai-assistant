@@ -91,11 +91,16 @@ class AssistantApplication : Application() {
             graph.vaultRepository.initializeFromDisk()
             graph.voicePackRepository.initialize()
             val settings = graph.prefs.snapshot()
-            if (settings.backgroundModeActive) {
-                AssistantKeepAliveService.syncServiceState(this@AssistantApplication, true)
-            }
-            if (settings.gmailWatcherEnabled && settings.gmailAddress.isNotBlank()) {
-                GmailDirectWatcherService.syncServiceState(this@AssistantApplication, true)
+            if (settings.isAssistantEnabled) {
+                if (settings.backgroundModeActive) {
+                    AssistantKeepAliveService.syncServiceState(this@AssistantApplication, true)
+                }
+                if (settings.gmailWatcherEnabled && settings.gmailAddress.isNotBlank()) {
+                    GmailDirectWatcherService.syncServiceState(this@AssistantApplication, true)
+                }
+            } else {
+                AssistantKeepAliveService.syncServiceState(this@AssistantApplication, false)
+                GmailDirectWatcherService.syncServiceState(this@AssistantApplication, false)
             }
         }
     }

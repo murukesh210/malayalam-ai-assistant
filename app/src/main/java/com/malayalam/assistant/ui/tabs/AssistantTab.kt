@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,6 +52,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -91,6 +93,7 @@ import com.malayalam.assistant.ui.theme.matteCharcoalGradient
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MinimalVoiceHomeScreen(
+    isAssistantEnabled: Boolean,
     heroText: String,
     activePackName: String,
     voiceSessionState: VoiceSessionState,
@@ -103,6 +106,7 @@ fun MinimalVoiceHomeScreen(
     backgroundModeActive: Boolean,
     missingBgPermissionHint: Boolean,
     isIgnoringBatteryOptimizations: Boolean,
+    onToggleMasterPower: () -> Unit,
     onOrbClick: () -> Unit,
     onStopLiveSession: () -> Unit,
     onStopAudio: () -> Unit,
@@ -118,13 +122,16 @@ fun MinimalVoiceHomeScreen(
 ) {
     var showSparkleInputSheet by rememberSaveable { mutableStateOf(false) }
 
-    val isLiveSessionActive = voiceSessionState != VoiceSessionState.IDLE
-    val isListeningOrb = voiceSessionState == VoiceSessionState.LISTENING ||
-        voiceSessionState == VoiceSessionState.RECORDING_SPEECH ||
-        isFallbackMicListening
-    val isThinkingOrb = voiceSessionState == VoiceSessionState.THINKING || isThinking
+    val isLiveSessionActive = isAssistantEnabled && voiceSessionState != VoiceSessionState.IDLE
+    val isListeningOrb = isAssistantEnabled && (
+        voiceSessionState == VoiceSessionState.LISTENING ||
+            voiceSessionState == VoiceSessionState.RECORDING_SPEECH ||
+            isFallbackMicListening
+        )
+    val isThinkingOrb = isAssistantEnabled && (voiceSessionState == VoiceSessionState.THINKING || isThinking)
 
     val displayHeadline = when {
+        !isAssistantEnabled -> "അസിസ്റ്റന്റ് ഓഫ് ആണ്"
         voiceSessionState == VoiceSessionState.RECORDING_SPEECH ->
             if (speechLocale.startsWith("ml")) "കേൾക്കുന്നു..." else "Listening..."
         voiceSessionState == VoiceSessionState.LISTENING || isFallbackMicListening ->
@@ -143,57 +150,109 @@ fun MinimalVoiceHomeScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // 1. Minimal Top Bar: ☰ Left, Active Voice Pack Chip Center, ⚙️ Right
-        Row(
+        // 1. Minimal Top Bar: ☰ Left, Master ON/OFF Pill Center (+ Active Pack Chip below), ⚙️ Right
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .align(Alignment.TopCenter),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            SoftGlowIconButton(onClick = onOpenDrawer) {
-                Icon(
-                    imageVector = Icons.Default.Menu,
-                    contentDescription = "Menu",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SoftGlowIconButton(onClick = onOpenDrawer) {
+                    Icon(
+                        imageVector = Icons.Default.Menu,
+                        contentDescription = "Menu",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                // Master Power Toggle Pill (ON / OFF) centered between ☰ and ⚙️
+                val powerAccent = if (isAssistantEnabled) GeminiMint else GeminiCoral
+                val powerBg = if (isAssistantEnabled) {
+                    GeminiMint.copy(alpha = 0.14f)
+                } else {
+                    GeminiCoral.copy(alpha = 0.12f)
+                }
+                val powerBorder = if (isAssistantEnabled) {
+                    GeminiMint.copy(alpha = 0.72f)
+                } else {
+                    GeminiCoral.copy(alpha = 0.55f)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(powerBg)
+                        .border(1.dp, powerBorder, RoundedCornerShape(22.dp))
+                        .clickable(onClick = onToggleMasterPower)
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PowerSettingsNew,
+                        contentDescription = if (isAssistantEnabled) "Turn Assistant OFF" else "Turn Assistant ON",
+                        tint = powerAccent,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(powerAccent)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (isAssistantEnabled) "ON" else "OFF",
+                        color = if (isAssistantEnabled) GeminiMint else GeminiCoral,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+
+                SoftGlowIconButton(onClick = onOpenSettings) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = Color.White,
+                        modifier = Modifier.size(23.dp)
+                    )
+                }
             }
 
-            // Compact Active Pack Chip (`🎬 Mammootty Pack` / `🎬 My Custom Pack`)
+            // Compact Active Pack Chip (`🎬 Mammootty Pack` / `🎬 My Custom Pack`) cleanly aligned right below top bar
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
                     .background(GeminiSurface.copy(alpha = 0.85f))
                     .border(1.dp, OrbBorderSubtle, RoundedCornerShape(20.dp))
                     .clickable(onClick = onOpenVoicePacks)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
                     imageVector = Icons.Default.Movie,
                     contentDescription = null,
                     tint = GeminiViolet,
-                    modifier = Modifier.size(14.dp)
+                    modifier = Modifier.size(13.dp)
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
                     text = activePackName,
                     color = GeminiTextPrimary,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            SoftGlowIconButton(onClick = onOpenSettings) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Settings",
-                    tint = Color.White,
-                    modifier = Modifier.size(23.dp)
                 )
             }
         }
@@ -208,32 +267,52 @@ fun MinimalVoiceHomeScreen(
         ) {
             Crossfade(targetState = displayHeadline, label = "hero_headline") { headline ->
                 val isShortGreeting = headline.length <= 18
-                Text(
-                    text = headline,
-                    color = Color.White,
-                    fontSize = if (isShortGreeting) 30.sp else 20.sp,
-                    lineHeight = if (isShortGreeting) 38.sp else 28.sp,
-                    fontWeight = if (isShortGreeting) FontWeight.Medium else FontWeight.Normal,
-                    textAlign = TextAlign.Center,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = headline,
+                        color = if (isAssistantEnabled) Color.White else GeminiTextPrimary.copy(alpha = 0.82f),
+                        fontSize = if (isShortGreeting) 28.sp else 20.sp,
+                        lineHeight = if (isShortGreeting) 36.sp else 28.sp,
+                        fontWeight = if (isShortGreeting) FontWeight.Medium else FontWeight.Normal,
+                        textAlign = TextAlign.Center,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (!isAssistantEnabled) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Notifications & voice paused",
+                            color = GeminiTextSecondary,
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.height(16.dp))
 
-            GlowingWaveformOrb(
-                isListening = isListeningOrb,
-                isPlaying = playbackState.isPlaying || isThinkingOrb,
-                micLevel = when {
-                    voiceSessionState == VoiceSessionState.RECORDING_SPEECH -> micRmsLevel.coerceAtLeast(0.28f)
-                    voiceSessionState == VoiceSessionState.LISTENING -> 0.16f
-                    isThinkingOrb -> 0.35f
-                    else -> micRmsLevel
-                },
-                onClick = onOrbClick
-            )
+            Box(modifier = Modifier.alpha(if (isAssistantEnabled) 1f else 0.45f)) {
+                GlowingWaveformOrb(
+                    isListening = isListeningOrb,
+                    isPlaying = isAssistantEnabled && (playbackState.isPlaying || isThinkingOrb),
+                    micLevel = if (!isAssistantEnabled) {
+                        0f
+                    } else {
+                        when {
+                            voiceSessionState == VoiceSessionState.RECORDING_SPEECH -> micRmsLevel.coerceAtLeast(0.28f)
+                            voiceSessionState == VoiceSessionState.LISTENING -> 0.16f
+                            isThinkingOrb -> 0.35f
+                            else -> micRmsLevel
+                        }
+                    },
+                    onClick = onOrbClick
+                )
+            }
 
             Spacer(Modifier.height(14.dp))
 
@@ -362,10 +441,11 @@ fun MinimalVoiceHomeScreen(
         }
 
         FourPointSparkleButton(
-            onClick = { showSparkleInputSheet = true },
+            onClick = { if (isAssistantEnabled) showSparkleInputSheet = true else onOrbClick() },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 14.dp, bottom = 14.dp)
+                .alpha(if (isAssistantEnabled) 1f else 0.45f)
         )
     }
 

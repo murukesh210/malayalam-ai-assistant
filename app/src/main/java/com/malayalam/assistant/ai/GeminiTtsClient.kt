@@ -18,6 +18,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Low-Latency Streaming Google AI Studio TTS Client (`v1beta`):
@@ -34,6 +35,13 @@ class GeminiTtsClient {
         isLenient = true
     }
 
+    private val cancelRequested = AtomicBoolean(false)
+
+    fun cancelStreaming() {
+        cancelRequested.set(true)
+        SharedGeminiHttp.cancelAllInFlightCalls()
+    }
+
     /**
      * Streams decoded 24 kHz 16-bit signed little-endian mono PCM chunks via [onPcmChunk].
      * Returns `true` if at least one audio chunk was streamed, `false` to let caller fall back.
@@ -48,6 +56,7 @@ class GeminiTtsClient {
         val cleanKey = apiKey.trim()
         val cleanText = text.replace(Regex("[🎬🔊✅⚠️✦]"), "").trim()
         if (cleanKey.isBlank() || cleanText.isBlank()) return@withContext false
+        cancelRequested.set(false)
 
         val safeVoice = voiceName.ifBlank { "Kore" }
         val primaryPayload = buildTtsPayload(
@@ -110,7 +119,7 @@ class GeminiTtsClient {
                 if (!resp.isSuccessful) return@use false
                 val stream = resp.body?.byteStream() ?: return@use false
                 BufferedReader(InputStreamReader(stream, Charsets.UTF_8), 8192).use { reader ->
-                    while (isActive) {
+                    while (isActive && !cancelRequested.get()) {
                         val line = reader.readLine() ?: break
                         if (!line.startsWith("data:")) continue
                         val jsonChunk = line.removePrefix("data:").trim()

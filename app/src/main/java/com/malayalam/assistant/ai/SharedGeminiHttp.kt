@@ -49,4 +49,11 @@ object SharedGeminiHttp {
     fun evictStaleSockets() {
         runCatching { sharedPool.evictAll() }
     }
+
+    /** Immediately aborts all in-flight Gemini Brain & Streaming TTS HTTP calls when Master Power is turned OFF. */
+    fun cancelAllInFlightCalls() {
+        runCatching { client.dispatcher.cancelAll() }
+        runCatching { fastClient.dispatcher.cancelAll() }
+        runCatching { ultraFastNotificationClient.dispatcher.cancelAll() }
+    }
 }

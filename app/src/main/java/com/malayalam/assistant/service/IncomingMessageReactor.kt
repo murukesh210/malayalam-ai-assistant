@@ -97,6 +97,9 @@ class IncomingMessageReactor(private val context: Context) {
         appPackageHint: String? = null,
         bypassCooldownAndGuards: Boolean = false
     ): ReactionOutcome? = withContext(Dispatchers.IO) {
+        // Hard Master Power Gate: zero background reactions, clips, or TTS can ever fire while OFF
+        if (!AppGraph.from(context).prefs.isAssistantEnabledNow) return@withContext null
+
         val t0 = System.currentTimeMillis()
         // Preserve full UTF-8 Malayalam Unicode (\u0D00-\u0D7F); only collapse whitespace
         val cleanMsg = messageText.replace(Regex("\\s+"), " ").trim()
@@ -400,6 +403,8 @@ class IncomingMessageReactor(private val context: Context) {
 class SmsReactionReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
+        // Hard Master Power Gate: immediately ignore SMS when Assistant is OFF
+        if (!AppGraph.from(context).prefs.isAssistantEnabledNow) return
         if (intent?.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
         val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
         if (messages.isNullOrEmpty()) return

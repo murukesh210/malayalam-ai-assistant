@@ -9,13 +9,21 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 private val Context.dataStore by preferencesDataStore(name = "assistant_settings")
 
 data class UserSettings(
+    val isAssistantEnabled: Boolean = true,
     val safTreeUri: String = "",
     val lowRamSafeMode: Boolean = true,
     val ultraLight2GbMode: Boolean = false,
@@ -73,6 +81,7 @@ data class UserSettings(
 class AppPreferences(private val context: Context) {
 
     private object Keys {
+        val IS_ASSISTANT_ENABLED = booleanPreferencesKey("is_assistant_enabled")
         val SAF_TREE_URI = stringPreferencesKey("saf_tree_uri")
         val LOW_RAM_SAFE_MODE = booleanPreferencesKey("low_ram_safe_mode")
         val ULTRA_LIGHT_2GB_MODE = booleanPreferencesKey("ultra_light_2gb_mode")
@@ -103,8 +112,24 @@ class AppPreferences(private val context: Context) {
     val defaultLowRamMode: Boolean by lazy { isDevice4GbClass(context) }
     val defaultUltraLight2Gb: Boolean by lazy { isDevice2GbClass(context) }
 
+    private val prefScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var cachedAssistantEnabled: Boolean = true
+
+    private val _isAssistantEnabledFlow = MutableStateFlow(true)
+    val isAssistantEnabledFlow: StateFlow<Boolean> = _isAssistantEnabledFlow.asStateFlow()
+
+    /** Fast non-blocking getter for background services & BroadcastReceivers. */
+    val isAssistantEnabledNow: Boolean
+        get() = cachedAssistantEnabled
+
     val settingsFlow: Flow<UserSettings> = context.dataStore.data.map { prefs ->
+        val masterOn = prefs[Keys.IS_ASSISTANT_ENABLED] ?: true
+        cachedAssistantEnabled = masterOn
+        _isAssistantEnabledFlow.value = masterOn
         UserSettings(
+            isAssistantEnabled = masterOn,
             safTreeUri = prefs[Keys.SAF_TREE_URI] ?: "",
             lowRamSafeMode = prefs[Keys.LOW_RAM_SAFE_MODE] ?: defaultLowRamMode,
             ultraLight2GbMode = prefs[Keys.ULTRA_LIGHT_2GB_MODE] ?: defaultUltraLight2Gb,
@@ -133,7 +158,31 @@ class AppPreferences(private val context: Context) {
         )
     }
 
+    init {
+        // Eagerly prime cachedAssistantEnabled from DataStore on startup/boot so background listeners know immediately
+        prefScope.launch {
+            runCatching {
+                context.dataStore.data.collect { prefs ->
+                    val enabled = prefs[Keys.IS_ASSISTANT_ENABLED] ?: true
+                    cachedAssistantEnabled = enabled
+                    _isAssistantEnabledFlow.value = enabled
+                }
+            }
+        }
+    }
+
     suspend fun snapshot(): UserSettings = settingsFlow.first()
+
+    fun setAssistantEnabledInstantFlag(enabled: Boolean) {
+        cachedAssistantEnabled = enabled
+        _isAssistantEnabledFlow.value = enabled
+    }
+
+    suspend fun setAssistantEnabled(enabled: Boolean) {
+        cachedAssistantEnabled = enabled
+        _isAssistantEnabledFlow.value = enabled
+        context.dataStore.edit { it[Keys.IS_ASSISTANT_ENABLED] = enabled }
+    }
 
     suspend fun saveGeminiApiKey(rawKey: String) {
         val trimmed = rawKey.trim()

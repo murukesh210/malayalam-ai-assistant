@@ -233,6 +233,10 @@ class AssistantVoiceInteractionSession(context: Context) :
     }
 
     private fun toggleMicListening() {
+        if (!graph.prefs.isAssistantEnabledNow) {
+            uiState.value = uiState.value.copy(assistantResponse = "അസിസ്റ്റന്റ് ഓഫ് ആണ്")
+            return
+        }
         if (uiState.value.isListeningMic) {
             stopSpeechRecognizer()
             return
@@ -290,6 +294,10 @@ class AssistantVoiceInteractionSession(context: Context) :
     }
 
     private fun submitPrompt(rawPrompt: String) {
+        if (!graph.prefs.isAssistantEnabledNow) {
+            uiState.value = uiState.value.copy(isThinking = false, assistantResponse = "അസിസ്റ്റന്റ് ഓഫ് ആണ്")
+            return
+        }
         val prompt = rawPrompt.trim()
         if (prompt.isBlank()) return
         uiState.value = uiState.value.copy(inputText = "", isThinking = true)

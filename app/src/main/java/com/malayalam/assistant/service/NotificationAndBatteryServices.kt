@@ -95,6 +95,9 @@ class DialogueNotificationListenerService : NotificationListenerService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        // Hard Master Power Gate: when OFF, do NOT read notification text, log, call AI, or play audio!
+        if (!AppGraph.from(applicationContext).prefs.isAssistantEnabledNow) return
+
         val notification = sbn?.notification ?: return
         val pkg = sbn.packageName ?: return
         if (pkg == packageName) return
@@ -188,6 +191,7 @@ class DialogueNotificationListenerService : NotificationListenerService() {
 
 class BatteryLowReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
+        if (!AppGraph.from(context).prefs.isAssistantEnabledNow) return
         if (intent?.action != Intent.ACTION_BATTERY_LOW) return
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {

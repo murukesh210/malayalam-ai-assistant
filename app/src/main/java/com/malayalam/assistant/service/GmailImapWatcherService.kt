@@ -348,7 +348,7 @@ class GmailDirectWatcherService : Service() {
         val graph = AppGraph.from(applicationContext)
         while (scope.isActive) {
             val settings = graph.prefs.snapshot()
-            if (!settings.gmailWatcherEnabled) {
+            if (!settings.isAssistantEnabled || !settings.gmailWatcherEnabled) {
                 stopWatcher()
                 return
             }

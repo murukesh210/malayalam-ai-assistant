@@ -38,8 +38,11 @@ class AssistantKeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP || intent?.action == ACTION_STOP_FROM_NOTIFICATION) {
-            if (intent.action == ACTION_STOP_FROM_NOTIFICATION) {
+        if (!AppGraph.from(applicationContext).prefs.isAssistantEnabledNow ||
+            intent?.action == ACTION_STOP ||
+            intent?.action == ACTION_STOP_FROM_NOTIFICATION
+        ) {
+            if (intent?.action == ACTION_STOP_FROM_NOTIFICATION) {
                 CoroutineScope(Dispatchers.IO).launch {
                     AppGraph.from(applicationContext).prefs.setBackgroundModeActive(false)
                 }
@@ -138,6 +141,9 @@ class BootCompletedReceiver : BroadcastReceiver() {
             try {
                 val graph = AppGraph.from(context)
                 val settings = graph.prefs.snapshot()
+                // Do NOT auto-start background services after reboot when Master Power is OFF!
+                if (!settings.isAssistantEnabled) return@launch
+
                 if (settings.backgroundModeActive || settings.alwaysOnKeepAliveEnabled) {
                     AssistantKeepAliveService.syncServiceState(context, true)
                 }

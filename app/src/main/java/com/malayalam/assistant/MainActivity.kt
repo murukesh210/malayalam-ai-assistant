@@ -137,6 +137,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val isAssistantEnabled by viewModel.isAssistantEnabled.collectAsState()
                 val heroText by viewModel.heroGreetingOrReply.collectAsState()
                 val voiceSessionState by viewModel.voiceSessionState.collectAsState()
                 val continuousMicRms by viewModel.continuousMicRms.collectAsState()
@@ -386,6 +387,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     when (destination) {
                         AppDestination.HOME_ORB -> MinimalVoiceHomeScreen(
+                            isAssistantEnabled = isAssistantEnabled,
                             heroText = heroText,
                             activePackName = activePackName,
                             voiceSessionState = voiceSessionState,
@@ -395,10 +397,25 @@ class MainActivity : ComponentActivity() {
                             isFallbackMicListening = isFallbackMicListening,
                             isThinking = isThinkingTyped,
                             micRmsLevel = continuousMicRms,
-                            backgroundModeActive = settings.backgroundModeActive,
+                            backgroundModeActive = isAssistantEnabled && settings.backgroundModeActive,
                             missingBgPermissionHint = !notifEnabled && !smsPermGranted,
                             isIgnoringBatteryOptimizations = isIgnoringBatteryOpt,
+                            onToggleMasterPower = {
+                                if (isAssistantEnabled) {
+                                    stopFallbackMic()
+                                    isFallbackMicListening = false
+                                }
+                                viewModel.toggleMasterAssistantPower()
+                            },
                             onOrbClick = {
+                                if (!isAssistantEnabled) {
+                                    android.widget.Toast.makeText(
+                                        this@MainActivity,
+                                        "Tap ON at the top to wake Assistant",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                    return@MinimalVoiceHomeScreen
+                                }
                                 val hasMicPerm = ContextCompat.checkSelfPermission(
                                     this@MainActivity,
                                     Manifest.permission.RECORD_AUDIO
@@ -433,6 +450,14 @@ class MainActivity : ComponentActivity() {
                             onStopLiveSession = viewModel::stopContinuousLiveSession,
                             onStopAudio = viewModel::stopAudio,
                             onToggleBackgroundMode = {
+                                if (!isAssistantEnabled) {
+                                    android.widget.Toast.makeText(
+                                        this@MainActivity,
+                                        "Tap ON at the top first to enable Background Mode",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                    return@MinimalVoiceHomeScreen
+                                }
                                 if (!settings.backgroundModeActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                     runtimePermissionsLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
                                 }
